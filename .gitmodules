@@ -1,0 +1,3 @@
+[submodule "gargammel"]
+	path = gargammel
+	url = https://github.com/grenaud/gargammel.git
