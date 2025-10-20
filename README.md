@@ -34,6 +34,7 @@ mamba env create -f environment.yml -p $ENV_PATH
 cd $ENV_PATH/lib
 ln -s libgsl.so.27 libgsl.so.25
 cd -
+mamba activate $ENV_PATH
 ```
 
 ### Using singularity
