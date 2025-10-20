@@ -66,16 +66,81 @@ fi
 if [[ ! -d "$GARGAMMEL_DIR" ]]; then
     echo "Error: Gargammel directory not found: $GARGAMMEL_DIR"; exit 1
 fi
-if [[ ! -f "$GARGAMMEL_DIR/gargammel.pl" ]]; then
-    echo "Error: gargammel.pl not found in $GARGAMMEL_DIR"; exit 1
+
+# Convert to absolute paths for Singularity binding
+ALLELES_FASTA=$(realpath "$ALLELES_FASTA")
+REFERENCE=$(realpath "$REFERENCE")
+OUTPUT_DIR=$(realpath "$OUTPUT_DIR")
+GARGAMMEL_DIR=$(realpath "$GARGAMMEL_DIR")
+
+# Determine gargammel execution method
+USE_SINGULARITY=false
+SINGULARITY_CONTAINER=""
+
+if command -v gargammel &>/dev/null; then
+    # gargammel available as command (conda/native install)
+    GARGAMMEL_CMD="gargammel"
+    echo "Using gargammel from PATH"
+elif command -v singularity &>/dev/null; then
+    # Check for Singularity container in repo
+    SINGULARITY_CONTAINER="$GARGAMMEL_DIR/gargammel_1.1.4--hb66fcc3_0.sif"
+    if [[ -f "$SINGULARITY_CONTAINER" ]]; then
+        USE_SINGULARITY=true
+        echo "Using gargammel via Singularity container: $SINGULARITY_CONTAINER"
+        
+        # Collect unique directories that need to be bound
+        BIND_PATHS=""
+        
+        # Get parent directories of input files
+        ALLELES_DIR=$(dirname "$ALLELES_FASTA")
+        REF_DIR=$(dirname "$REFERENCE")
+        
+        # Add unique paths to bind
+        declare -A BIND_DIRS
+        BIND_DIRS["$ALLELES_DIR"]=1
+        BIND_DIRS["$REF_DIR"]=1
+        BIND_DIRS["$OUTPUT_DIR"]=1
+        BIND_DIRS["$GARGAMMEL_DIR"]=1
+        
+        # Build bind path string
+        for dir in "${!BIND_DIRS[@]}"; do
+            if [[ -z "$BIND_PATHS" ]]; then
+                BIND_PATHS="$dir"
+            else
+                BIND_PATHS="$BIND_PATHS,$dir"
+            fi
+        done
+        
+        GARGAMMEL_CMD="singularity exec -B \"$BIND_PATHS\" $SINGULARITY_CONTAINER gargammel"
+    else
+        echo "Error: Singularity found but container not found: $SINGULARITY_CONTAINER"
+        echo "Please ensure gargammel_1.1.4--hb66fcc3_0.sif is in $GARGAMMEL_DIR"
+        exit 1
+    fi
+else
+    echo "Error: Neither gargammel command nor singularity found."
+    echo "Please install gargammel or singularity."
+    exit 1
+fi
+
+# Validate gargammel installation (skip for Singularity)
+if [[ "$USE_SINGULARITY" == false ]]; then
+    if [[ ! -f "$GARGAMMEL_DIR/gargammel.pl" ]]; then
+        echo "Error: gargammel.pl not found in $GARGAMMEL_DIR"; exit 1
+    fi
 fi
 
 # matrix verification
 MATRIX_DIR="$GARGAMMEL_DIR/src/matrices"
 MATRIX_SINGLE="$MATRIX_DIR/single-"
 MATRIX_DOUBLE="$MATRIX_DIR/double-"
+
+# For Singularity, matrices are inside the container
 if [[ ! -d "$MATRIX_DIR" ]]; then
     echo "Error: Matrices directory missing: $MATRIX_DIR"; exit 1
+fi
+if [[ "$USE_SINGULARITY" == true ]]; then
+    BIND_PATHS="$BIND_PATHS,$MATRIX_DIR"
 fi
 
 # library type
@@ -103,19 +168,15 @@ for cmd in samtools bwa; do
     fi
 done
 
-# gargamel executable in conda environment
-if command -v gargammel &>/dev/null; then
-    GARGAMMEL_CMD="gargammel"
-else
-    GARGAMMEL_CMD="$GARGAMMEL_DIR/gargammel.pl"
-fi
-
 mkdir -p "$OUTPUT_DIR"/{logs,temp,bams}
 
 echo "=== AncestralSim: Ancient DNA Simulation Pipeline ==="
 echo "Input alleles: $ALLELES_FASTA"
 echo "Reference: $REFERENCE"
 echo "Gargammel: $GARGAMMEL_CMD"
+if [[ "$USE_SINGULARITY" == true ]]; then
+    echo "Singularity bind paths: $BIND_PATHS"
+fi
 echo "Coverage: ${COVERAGE}x"
 echo "Fragment length: ${FRAGMENT_LENGTH}bp"
 echo "Read length: ${READ_LENGTH}bp"
@@ -153,7 +214,7 @@ if [[ ! -f "${REFERENCE}.fai" ]]; then
     samtools faidx "$REFERENCE"
 fi
 
-# rename fasta headers for garfamel
+# rename fasta headers for gargammel
 rename_fasta_header() {
     local input_fasta=$1
     local output_fasta=$2
@@ -210,7 +271,7 @@ while IFS= read -r sample; do
         CONT_HAP1_ORIG=$(grep "^${CONT_SAMPLE}#1#" "$FAI_FILE" | cut -f1)
         CONT_HAP2_ORIG=$(grep "^${CONT_SAMPLE}#2#" "$FAI_FILE" | cut -f1)
         
-        # extract t and rename to common chromosome name
+        # extract and rename to common chromosome name
         samtools faidx "$ALLELES_FASTA" "$CONT_HAP1_ORIG" | \
             sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/cont_hap1.fa"
         samtools faidx "$ALLELES_FASTA" "$CONT_HAP2_ORIG" | \
@@ -240,7 +301,7 @@ while IFS= read -r sample; do
     echo "dummy.fa (chr_bact) <- $ENDO_HAP1_ORIG (dummy)" >> "$MAPPING_LOG"
     echo "" >> "$MAPPING_LOG"
 
-    # build gargamel command
+    # build gargammel command
     echo "   Running gargammel simulation..."
     
     GARGAMMEL_RUN="$GARGAMMEL_CMD \
@@ -269,6 +330,7 @@ while IFS= read -r sample; do
     
     # input directory - should be last
     GARGAMMEL_RUN="$GARGAMMEL_RUN $SAMPLE_DIR"
+    echo $GARGAMMEL_RUN
     
     # execute
     eval $GARGAMMEL_RUN > "$OUTPUT_DIR/logs/${sample}_gargammel.log" 2>&1
@@ -349,6 +411,7 @@ Date: $(date)
 Input alleles: $ALLELES_FASTA
 Reference: $REFERENCE
 Gargammel directory: $GARGAMMEL_DIR
+Execution method: $(if [[ "$USE_SINGULARITY" == true ]]; then echo "Singularity"; else echo "Native/Conda"; fi)
 
 Simulation Parameters:
 - Coverage: ${COVERAGE}x
