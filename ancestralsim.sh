@@ -3,8 +3,8 @@
 
 # default
 COVERAGE=0.5
-FRAGMENT_LENGTH=45
-READ_LENGTH=75
+FRAGMENT_LENGTH=70
+READ_LENGTH=100
 DEAMINATION="single"
 DEAM_RATE=""
 LIBRARY_TYPE="pe"
@@ -25,8 +25,8 @@ Required:
 
 Optional:
   -c FLOAT    Target coverage (default 0.5)
-  -l INT      Mean fragment length (default 45)
-  -R INT      Read length (default 75)
+  -l INT      Mean fragment length (default 70)
+  -R INT      Read length (default 100)
   -L TYPE     Library type: se|pe (default pe)
   -d TYPE     Deamination type: single|double (default single)
   --deam-rate "VALS"  Custom deam rates like "0.03,0.4,0.01,0.3"
@@ -162,7 +162,7 @@ fi
 ENDO_RATIO=$(python3 -c "print(round(1.0 - $CONT_RATIO, 6))")
 
 # dependencies
-for cmd in samtools bwa; do
+for cmd in samtools bwa fastp; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd not found. Please install it."; exit 1
     fi
@@ -213,20 +213,6 @@ if [[ ! -f "${REFERENCE}.fai" ]]; then
     echo "Indexing reference with samtools..."
     samtools faidx "$REFERENCE"
 fi
-
-# rename fasta headers for gargammel
-rename_fasta_header() {
-    local input_fasta=$1
-    local output_fasta=$2
-    local new_name=$3
-    local original_name=$4
-
-    if [[ "$input_fasta" == *.gz ]]; then
-        zcat "$input_fasta" | sed "s/^>${original_name}/>${new_name}/" > "$output_fasta"
-    else
-        sed "s/^>${original_name}/>${new_name}/" "$input_fasta" > "$output_fasta"
-    fi
-}
 
 # process samples
 echo "[$(date)] Starting simulation for ${NDIPLOID} samples..."
@@ -330,12 +316,46 @@ while IFS= read -r sample; do
     
     # input directory - should be last
     GARGAMMEL_RUN="$GARGAMMEL_RUN $SAMPLE_DIR"
-    echo $GARGAMMEL_RUN
     
     # execute
     eval $GARGAMMEL_RUN > "$OUTPUT_DIR/logs/${sample}_gargammel.log" 2>&1
 
-    # alignment
+    # === Adapter trimming with fastp ===
+    echo "   Trimming adapters with fastp..."
+    
+    if [[ "$LIBRARY_TYPE" == "pe" ]]; then
+        # Paired-end trimming
+        fastp \
+            --in1 "$SAMPLE_DIR/sim_s1.fq.gz" \
+            --in2 "$SAMPLE_DIR/sim_s2.fq.gz" \
+            --out1 "$SAMPLE_DIR/sim_s1_trimmed.fq.gz" \
+            --out2 "$SAMPLE_DIR/sim_s2_trimmed.fq.gz" \
+            --detect_adapter_for_pe \
+            --thread "$THREADS" \
+            --length_required 25 \
+            --json "$OUTPUT_DIR/logs/${sample}_fastp.json" \
+            --html "$OUTPUT_DIR/logs/${sample}_fastp.html" \
+            2> "$OUTPUT_DIR/logs/${sample}_fastp.log"
+        
+        # Use trimmed files for alignment
+        READ1="$SAMPLE_DIR/sim_s1_trimmed.fq.gz"
+        READ2="$SAMPLE_DIR/sim_s2_trimmed.fq.gz"
+    else
+        # Single-end trimming
+        fastp \
+            --in1 "$SAMPLE_DIR/sim_s.fq.gz" \
+            --out1 "$SAMPLE_DIR/sim_s_trimmed.fq.gz" \
+            --thread "$THREADS" \
+            --length_required 25 \
+            --json "$OUTPUT_DIR/logs/${sample}_fastp.json" \
+            --html "$OUTPUT_DIR/logs/${sample}_fastp.html" \
+            2> "$OUTPUT_DIR/logs/${sample}_fastp.log"
+        
+        # Use trimmed file for alignment
+        READ1="$SAMPLE_DIR/sim_s_trimmed.fq.gz"
+    fi
+
+    # === Alignment ===
     echo "   Aligning reads with BWA aln..."
     
     if [[ "$LIBRARY_TYPE" == "pe" ]]; then
@@ -346,7 +366,7 @@ while IFS= read -r sample; do
             -o 2 \
             -t "$THREADS" \
             "$REFERENCE" \
-            "$SAMPLE_DIR/sim_s1.fq.gz" \
+            "$READ1" \
             > "$SAMPLE_DIR/sim_1.sai" \
             2> "$OUTPUT_DIR/logs/${sample}_bwa_aln_1.log"
         
@@ -356,7 +376,7 @@ while IFS= read -r sample; do
             -o 2 \
             -t "$THREADS" \
             "$REFERENCE" \
-            "$SAMPLE_DIR/sim_s2.fq.gz" \
+            "$READ2" \
             > "$SAMPLE_DIR/sim_2.sai" \
             2> "$OUTPUT_DIR/logs/${sample}_bwa_aln_2.log"
         
@@ -365,8 +385,8 @@ while IFS= read -r sample; do
             "$REFERENCE" \
             "$SAMPLE_DIR/sim_1.sai" \
             "$SAMPLE_DIR/sim_2.sai" \
-            "$SAMPLE_DIR/sim_s1.fq.gz" \
-            "$SAMPLE_DIR/sim_s2.fq.gz" \
+            "$READ1" \
+            "$READ2" \
             2> "$OUTPUT_DIR/logs/${sample}_bwa_sampe.log" | \
         samtools sort -@ "$THREADS" -o "$OUTPUT_DIR/bams/${sample}.sorted.bam" -
     else
@@ -377,7 +397,7 @@ while IFS= read -r sample; do
             -o 2 \
             -t "$THREADS" \
             "$REFERENCE" \
-            "$SAMPLE_DIR/sim_s.fq.gz" \
+            "$READ1" \
             > "$SAMPLE_DIR/sim.sai" \
             2> "$OUTPUT_DIR/logs/${sample}_bwa_aln.log"
         
@@ -385,7 +405,7 @@ while IFS= read -r sample; do
         bwa samse \
             "$REFERENCE" \
             "$SAMPLE_DIR/sim.sai" \
-            "$SAMPLE_DIR/sim_s.fq.gz" \
+            "$READ1" \
             2> "$OUTPUT_DIR/logs/${sample}_bwa_samse.log" | \
         samtools sort -@ "$THREADS" -o "$OUTPUT_DIR/bams/${sample}.sorted.bam" -
     fi
@@ -422,10 +442,16 @@ Simulation Parameters:
 - Contamination ratio: ${CONT_RATIO} (endogenous: ${ENDO_RATIO})
 - Number of diploid samples: $NDIPLOID
 
+Processing Steps:
+- Gargammel simulation with deamination
+- Adapter trimming with fastp (auto-detect)
+- BWA aln alignment
+
 Output Files:
 - BAM files: $OUTPUT_DIR/bams/*.sorted.bam
 - Sequence mappings: $OUTPUT_DIR/logs/*_sequence_mapping.txt
 - Gargammel logs: $OUTPUT_DIR/logs/*_gargammel.log
+- Fastp reports: $OUTPUT_DIR/logs/*_fastp.{json,html}
 
 Output BAM files:
 EOF
@@ -437,4 +463,6 @@ echo "=== AncestralSim Complete ==="
 echo "Output directory: $OUTPUT_DIR"
 echo "BAM files: $OUTPUT_DIR/bams/"
 echo "Sequence mappings: $OUTPUT_DIR/logs/*_sequence_mapping.txt"
+echo "Fastp reports: $OUTPUT_DIR/logs/*_fastp.html"
 echo "Summary: $OUTPUT_DIR/simulation_summary.txt"
+

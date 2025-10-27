@@ -39,7 +39,7 @@ cd -
 ### Using singularity
 
 ```bash
-singularity pull --dir . docker://quay.io/biocontainers/gargammel:1.1.4--hb66fcc3_0
+singularity pull --dir gargamel/. docker://quay.io/biocontainers/gargammel:1.1.4--hb66fcc3_0
 ```
 
 When using this `singularity` container, you need to also have `bwa` and `samtools` executables available in `$PATH`.
