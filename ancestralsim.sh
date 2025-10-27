@@ -349,6 +349,7 @@ while IFS= read -r sample; do
             --length_required 25 \
             --json "$OUTPUT_DIR/logs/${sample}_fastp.json" \
             --html "$OUTPUT_DIR/logs/${sample}_fastp.html" \
+            --adapter_sequence AGATCGGAAGAGCACACGTCTGAACTCCAG \
             2> "$OUTPUT_DIR/logs/${sample}_fastp.log"
         
         # Use trimmed file for alignment
