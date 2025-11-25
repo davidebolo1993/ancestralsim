@@ -1,7 +1,7 @@
 #!/bin/bash
 # ancestralsim: Ancient DNA simulation from pangenome haplotypes
 
-# default
+# Defaults
 COVERAGE=0.5
 FRAGMENT_LENGTH=70
 READ_LENGTH=100
@@ -12,16 +12,17 @@ REFERENCE=""
 OUTPUT_DIR="output"
 THREADS=4
 GARGAMMEL_DIR=""
-CONT_RATIO=0.1  # default 10% exogenous contamination
+CONT_RATIO=0.1
+REGION_MAP=""
 
 usage() {
 cat <<EOF
-Usage: $0 -f <alleles.fasta> -r <reference.fa> -g <gargammel_dir> [options]
+Usage: $0 -r <reference.fa> -g <gargammel_dir> -b <region_mapping.tsv> [options]
 
 Required:
-  -f FILE     Input FASTA file with pangenome alleles (can be gzipped)
-  -r FILE     Reference chromosome FASTA for alignment
+  -r FILE     Reference genome FASTA
   -g DIR      Path to gargammel installation directory
+  -b FILE     TSV mapping regions to alleles (chr<TAB>region_name<TAB>fasta_path)
 
 Optional:
   -c FLOAT    Target coverage (default 0.5)
@@ -39,12 +40,11 @@ EOF
 exit 1
 }
 
-# params parser
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -f) ALLELES_FASTA="$2"; shift 2 ;;
         -r) REFERENCE="$2"; shift 2 ;;
         -g) GARGAMMEL_DIR="$2"; shift 2 ;;
+        -b) REGION_MAP="$2"; shift 2 ;;
         -c) COVERAGE="$2"; shift 2 ;;
         -l) FRAGMENT_LENGTH="$2"; shift 2 ;;
         -R) READ_LENGTH="$2"; shift 2 ;;
@@ -59,50 +59,49 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# input validation
-if [[ -z "$ALLELES_FASTA" || -z "$REFERENCE" || -z "$GARGAMMEL_DIR" ]]; then
-    echo "Error: -f, -r, and -g are required."; usage
+if [[ -z "$REFERENCE" || -z "$GARGAMMEL_DIR" || -z "$REGION_MAP" ]]; then
+    echo "Error: -r, -g, and -b are required."; usage
 fi
 if [[ ! -d "$GARGAMMEL_DIR" ]]; then
     echo "Error: Gargammel directory not found: $GARGAMMEL_DIR"; exit 1
 fi
+if [[ ! -f "$REGION_MAP" ]]; then
+    echo "Error: Region mapping file not found: $REGION_MAP"; exit 1
+fi
 
-# Convert to absolute paths for Singularity binding
-ALLELES_FASTA=$(realpath "$ALLELES_FASTA")
 REFERENCE=$(realpath "$REFERENCE")
 OUTPUT_DIR=$(realpath "$OUTPUT_DIR")
 GARGAMMEL_DIR=$(realpath "$GARGAMMEL_DIR")
+REGION_MAP=$(realpath "$REGION_MAP")
 
-# Determine gargammel execution method
 USE_SINGULARITY=false
 SINGULARITY_CONTAINER=""
 
 if command -v gargammel &>/dev/null; then
-    # gargammel available as command (conda/native install)
     GARGAMMEL_CMD="gargammel"
     echo "Using gargammel from PATH"
 elif command -v singularity &>/dev/null; then
-    # Check for Singularity container in repo
     SINGULARITY_CONTAINER="$GARGAMMEL_DIR/gargammel_1.1.4--hb66fcc3_0.sif"
     if [[ -f "$SINGULARITY_CONTAINER" ]]; then
         USE_SINGULARITY=true
-        echo "Using gargammel via Singularity container: $SINGULARITY_CONTAINER"
+        echo "Using gargammel via Singularity container"
         
-        # Collect unique directories that need to be bound
         BIND_PATHS=""
-        
-        # Get parent directories of input files
-        ALLELES_DIR=$(dirname "$ALLELES_FASTA")
-        REF_DIR=$(dirname "$REFERENCE")
-        
-        # Add unique paths to bind
         declare -A BIND_DIRS
-        BIND_DIRS["$ALLELES_DIR"]=1
+        
+        while IFS=$'\t' read -r _ _ alleles_file; do
+            [[ "$alleles_file" =~ ^#.*$ ]] && continue
+            [[ -z "$alleles_file" ]] && continue
+            alleles_file=$(realpath "$alleles_file" 2>/dev/null) || continue
+            ALLELES_DIR=$(dirname "$alleles_file")
+            BIND_DIRS["$ALLELES_DIR"]=1
+        done < "$REGION_MAP"
+        
+        REF_DIR=$(dirname "$REFERENCE")
         BIND_DIRS["$REF_DIR"]=1
         BIND_DIRS["$OUTPUT_DIR"]=1
         BIND_DIRS["$GARGAMMEL_DIR"]=1
         
-        # Build bind path string
         for dir in "${!BIND_DIRS[@]}"; do
             if [[ -z "$BIND_PATHS" ]]; then
                 BIND_PATHS="$dir"
@@ -113,29 +112,23 @@ elif command -v singularity &>/dev/null; then
         
         GARGAMMEL_CMD="singularity exec -B \"$BIND_PATHS\" $SINGULARITY_CONTAINER gargammel"
     else
-        echo "Error: Singularity found but container not found: $SINGULARITY_CONTAINER"
-        echo "Please ensure gargammel_1.1.4--hb66fcc3_0.sif is in $GARGAMMEL_DIR"
+        echo "Error: Singularity container not found: $SINGULARITY_CONTAINER"
         exit 1
     fi
 else
-    echo "Error: Neither gargammel command nor singularity found."
-    echo "Please install gargammel or singularity."
-    exit 1
+    echo "Error: Neither gargammel nor singularity found."; exit 1
 fi
 
-# Validate gargammel installation (skip for Singularity)
 if [[ "$USE_SINGULARITY" == false ]]; then
     if [[ ! -f "$GARGAMMEL_DIR/gargammel.pl" ]]; then
         echo "Error: gargammel.pl not found in $GARGAMMEL_DIR"; exit 1
     fi
 fi
 
-# matrix verification
 MATRIX_DIR="$GARGAMMEL_DIR/src/matrices"
 MATRIX_SINGLE="$MATRIX_DIR/single-"
 MATRIX_DOUBLE="$MATRIX_DIR/double-"
 
-# For Singularity, matrices are inside the container
 if [[ ! -d "$MATRIX_DIR" ]]; then
     echo "Error: Matrices directory missing: $MATRIX_DIR"; exit 1
 fi
@@ -143,327 +136,375 @@ if [[ "$USE_SINGULARITY" == true ]]; then
     BIND_PATHS="$BIND_PATHS,$MATRIX_DIR"
 fi
 
-# library type
 if [[ "$LIBRARY_TYPE" != "se" ]] && [[ "$LIBRARY_TYPE" != "pe" ]]; then
     echo "Error: Library type must be 'se' or 'pe'"; exit 1
 fi
 
-# deamination type
 if [[ "$DEAMINATION" != "single" ]] && [[ "$DEAMINATION" != "double" ]]; then
     echo "Error: Deamination type must be 'single' or 'double'"; exit 1
 fi
 
-# contamination-ratio validity
 if (( $(echo "$CONT_RATIO < 0" | bc -l) )) || (( $(echo "$CONT_RATIO > 1" | bc -l) )); then
     echo "Error: --cont-ratio must be between 0 and 1"; exit 1
 fi
 
-# endogenous (comp order: bact, cont, endo)
 ENDO_RATIO=$(python3 -c "print(round(1.0 - $CONT_RATIO, 6))")
 
-# dependencies
 for cmd in samtools bwa fastp; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd not found. Please install it."; exit 1
     fi
 done
 
-mkdir -p "$OUTPUT_DIR"/{logs,temp,bams}
+mkdir -p "$OUTPUT_DIR"
 
-echo "=== AncestralSim: Ancient DNA Simulation Pipeline ==="
-echo "Input alleles: $ALLELES_FASTA"
-echo "Reference: $REFERENCE"
-echo "Gargammel: $GARGAMMEL_CMD"
-if [[ "$USE_SINGULARITY" == true ]]; then
-    echo "Singularity bind paths: $BIND_PATHS"
-fi
-echo "Coverage: ${COVERAGE}x"
-echo "Fragment length: ${FRAGMENT_LENGTH}bp"
-echo "Read length: ${READ_LENGTH}bp"
-echo "Library type: $LIBRARY_TYPE"
-echo "Deamination: $DEAMINATION-stranded"
-echo "Contamination: ${CONT_RATIO} (endogenous: ${ENDO_RATIO})"
-echo ""
-
-# indexing if missing
-if [[ ! -f "${ALLELES_FASTA}.fai" ]]; then
-    echo "Indexing alleles FASTA..."
-    samtools faidx "$ALLELES_FASTA"
-fi
-FAI_FILE="${ALLELES_FASTA}.fai"
-
-# get diploid samples
-echo "Identifying diploid samples..."
-awk -F'[#\t]' '{print $1}' "$FAI_FILE" | sort | uniq -c | \
-awk '$1==2 {print $2}' > "$OUTPUT_DIR/temp/diploid_samples.txt"
-NDIPLOID=$(wc -l < "$OUTPUT_DIR/temp/diploid_samples.txt")
-echo "Found ${NDIPLOID} diploid samples"
-echo ""
-
-if [[ $NDIPLOID -eq 0 ]]; then
-    echo "Error: No diploid samples found in input FASTA"; exit 1
-fi
-
-# further reference indexing
-if [[ ! -f "${REFERENCE}.bwt" ]]; then
-    echo "Indexing reference with BWA..."
-    bwa index "$REFERENCE"
-fi
 if [[ ! -f "${REFERENCE}.fai" ]]; then
     echo "Indexing reference with samtools..."
     samtools faidx "$REFERENCE"
 fi
 
-# process samples
-echo "[$(date)] Starting simulation for ${NDIPLOID} samples..."
+echo "=== AncestralSim: Ancient DNA Simulation Pipeline ==="
+echo "Reference: $REFERENCE"
+echo "Region mapping: $REGION_MAP"
+echo "Coverage: ${COVERAGE}x, Fragment: ${FRAGMENT_LENGTH}bp, Read: ${READ_LENGTH}bp"
+echo "Library: $LIBRARY_TYPE, Deamination: $DEAMINATION, Contamination: ${CONT_RATIO}"
 echo ""
 
-while IFS= read -r sample; do
-    echo ">> Processing sample: ${sample}"
-    SAMPLE_DIR="$OUTPUT_DIR/temp/${sample}"
-    mkdir -p "$SAMPLE_DIR"/{endo,cont,bact}
-    
-    # mapping log file
-    MAPPING_LOG="$OUTPUT_DIR/logs/${sample}_sequence_mapping.txt"
-    echo "Sequence Name Mapping for Sample: ${sample}" > "$MAPPING_LOG"
-    echo "Generated: $(date)" >> "$MAPPING_LOG"
-    echo "" >> "$MAPPING_LOG"
+declare -A CHR_EXTRACTED
+N_REGIONS=$(grep -v "^#" "$REGION_MAP" | grep -v "^$" | wc -l)
+echo "Found $N_REGIONS regions to process"
+echo ""
 
-    # get endogenous haplotypes
-    echo "   Extracting endogenous haplotypes..."
-    
-    # original sequences
-    ENDO_HAP1_ORIG=$(grep "^${sample}#1#" "$FAI_FILE" | cut -f1)
-    ENDO_HAP2_ORIG=$(grep "^${sample}#2#" "$FAI_FILE" | cut -f1)
-    
-    # extract and rename
-    samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
-        sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap1.fa"
-    samtools faidx "$ALLELES_FASTA" "$ENDO_HAP2_ORIG" | \
-        sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap2.fa"
-    
-    # to log
-    echo "[ENDOGENOUS]" >> "$MAPPING_LOG"
-    echo "hap1.fa (chr_endo) <- $ENDO_HAP1_ORIG" >> "$MAPPING_LOG"
-    echo "hap2.fa (chr_endo) <- $ENDO_HAP2_ORIG" >> "$MAPPING_LOG"
-    echo "" >> "$MAPPING_LOG"
+GLOBAL_SUMMARY="$OUTPUT_DIR/global_simulation_summary.txt"
+MERGE_SCRIPT="$OUTPUT_DIR/merge_commands.sh"
 
-    # select and extract contaminants
-    if (( $(echo "$CONT_RATIO > 0" | bc -l) )); then
-        CONT_SAMPLE=$(grep -v "^${sample}$" "$OUTPUT_DIR/temp/diploid_samples.txt" | shuf -n 1)
-        echo "   Extracting contaminant: ${CONT_SAMPLE} (ratio: ${CONT_RATIO})"
-        
-        # original contaminant sequence names
-        CONT_HAP1_ORIG=$(grep "^${CONT_SAMPLE}#1#" "$FAI_FILE" | cut -f1)
-        CONT_HAP2_ORIG=$(grep "^${CONT_SAMPLE}#2#" "$FAI_FILE" | cut -f1)
-        
-        # extract and rename to common chromosome name
-        samtools faidx "$ALLELES_FASTA" "$CONT_HAP1_ORIG" | \
-            sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/cont_hap1.fa"
-        samtools faidx "$ALLELES_FASTA" "$CONT_HAP2_ORIG" | \
-            sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/cont_hap2.fa"
-        
-        # to log
-        echo "[CONTAMINANT] - Sample: ${CONT_SAMPLE}" >> "$MAPPING_LOG"
-        echo "cont_hap1.fa (chr_cont) <- $CONT_HAP1_ORIG" >> "$MAPPING_LOG"
-        echo "cont_hap2.fa (chr_cont) <- $CONT_HAP2_ORIG" >> "$MAPPING_LOG"
-        echo "" >> "$MAPPING_LOG"
-    else
-        echo "   No contamination (creating dummy cont file)"
-        # first endogenous haplotype as dummy - not used
-        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
-            sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/dummy.fa"
-        
-        echo "[CONTAMINANT] - None (dummy file)" >> "$MAPPING_LOG"
-        echo "dummy.fa (chr_cont) <- $ENDO_HAP1_ORIG (dummy)" >> "$MAPPING_LOG"
-        echo "" >> "$MAPPING_LOG"
-    fi
-    
-    # bacterial with dummy haplotype
-    samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
-        sed "s/^>.*/>chr_bact/" > "$SAMPLE_DIR/bact/dummy.fa"
-    
-    echo "[BACTERIAL] - None (dummy file)" >> "$MAPPING_LOG"
-    echo "dummy.fa (chr_bact) <- $ENDO_HAP1_ORIG (dummy)" >> "$MAPPING_LOG"
-    echo "" >> "$MAPPING_LOG"
-
-    # build gargammel command
-    echo "   Running gargammel simulation..."
-    
-    GARGAMMEL_RUN="$GARGAMMEL_CMD \
-        -c $COVERAGE \
-        --comp 0,$CONT_RATIO,$ENDO_RATIO \
-        -l $FRAGMENT_LENGTH \
-        -rl $READ_LENGTH \
-        -o $SAMPLE_DIR/sim"
-    
-    # deamination
-    if [[ -n "$DEAM_RATE" ]]; then
-        GARGAMMEL_RUN="$GARGAMMEL_RUN -damage $DEAM_RATE"
-    else
-        if [[ "$DEAMINATION" == "single" ]]; then
-            MATRIX="$MATRIX_SINGLE"
-        else
-            MATRIX="$MATRIX_DOUBLE"
-        fi
-        GARGAMMEL_RUN="$GARGAMMEL_RUN -matfile $MATRIX"
-    fi
-    
-    # library flag
-    if [[ "$LIBRARY_TYPE" == "se" ]]; then
-        GARGAMMEL_RUN="$GARGAMMEL_RUN -se"
-    fi
-    
-    # input directory - should be last
-    GARGAMMEL_RUN="$GARGAMMEL_RUN $SAMPLE_DIR"
-    
-    # execute
-    eval $GARGAMMEL_RUN > "$OUTPUT_DIR/logs/${sample}_gargammel.log" 2>&1
-
-    # === Adapter trimming with fastp ===
-    echo "   Trimming adapters with fastp..."
-    
-    if [[ "$LIBRARY_TYPE" == "pe" ]]; then
-        # Paired-end trimming
-        fastp \
-            --in1 "$SAMPLE_DIR/sim_s1.fq.gz" \
-            --in2 "$SAMPLE_DIR/sim_s2.fq.gz" \
-            --out1 "$SAMPLE_DIR/sim_s1_trimmed.fq.gz" \
-            --out2 "$SAMPLE_DIR/sim_s2_trimmed.fq.gz" \
-            --detect_adapter_for_pe \
-            --thread "$THREADS" \
-            --length_required 25 \
-            --json "$OUTPUT_DIR/logs/${sample}_fastp.json" \
-            --html "$OUTPUT_DIR/logs/${sample}_fastp.html" \
-            2> "$OUTPUT_DIR/logs/${sample}_fastp.log"
-        
-        # Use trimmed files for alignment
-        READ1="$SAMPLE_DIR/sim_s1_trimmed.fq.gz"
-        READ2="$SAMPLE_DIR/sim_s2_trimmed.fq.gz"
-    else
-        # Single-end trimming
-        fastp \
-            --in1 "$SAMPLE_DIR/sim_s.fq.gz" \
-            --out1 "$SAMPLE_DIR/sim_s_trimmed.fq.gz" \
-            --thread "$THREADS" \
-            --length_required 25 \
-            --json "$OUTPUT_DIR/logs/${sample}_fastp.json" \
-            --html "$OUTPUT_DIR/logs/${sample}_fastp.html" \
-            --adapter_sequence AGATCGGAAGAGCACACGTCTGAACTCCAG \
-            2> "$OUTPUT_DIR/logs/${sample}_fastp.log"
-        
-        # Use trimmed file for alignment
-        READ1="$SAMPLE_DIR/sim_s_trimmed.fq.gz"
-    fi
-
-    # === Alignment ===
-    echo "   Aligning reads with BWA aln..."
-    
-    if [[ "$LIBRARY_TYPE" == "pe" ]]; then
-        # paired
-        bwa aln \
-            -l 16500 \
-            -n 0.01 \
-            -o 2 \
-            -t "$THREADS" \
-            "$REFERENCE" \
-            "$READ1" \
-            > "$SAMPLE_DIR/sim_1.sai" \
-            2> "$OUTPUT_DIR/logs/${sample}_bwa_aln_1.log"
-        
-        bwa aln \
-            -l 16500 \
-            -n 0.01 \
-            -o 2 \
-            -t "$THREADS" \
-            "$REFERENCE" \
-            "$READ2" \
-            > "$SAMPLE_DIR/sim_2.sai" \
-            2> "$OUTPUT_DIR/logs/${sample}_bwa_aln_2.log"
-        
-        echo "   Converting to BAM..."
-        bwa sampe \
-            "$REFERENCE" \
-            "$SAMPLE_DIR/sim_1.sai" \
-            "$SAMPLE_DIR/sim_2.sai" \
-            "$READ1" \
-            "$READ2" \
-            2> "$OUTPUT_DIR/logs/${sample}_bwa_sampe.log" | \
-        samtools sort -@ "$THREADS" -o "$OUTPUT_DIR/bams/${sample}.sorted.bam" -
-    else
-        # single
-        bwa aln \
-            -l 16500 \
-            -n 0.01 \
-            -o 2 \
-            -t "$THREADS" \
-            "$REFERENCE" \
-            "$READ1" \
-            > "$SAMPLE_DIR/sim.sai" \
-            2> "$OUTPUT_DIR/logs/${sample}_bwa_aln.log"
-        
-        echo "   Converting to BAM..."
-        bwa samse \
-            "$REFERENCE" \
-            "$SAMPLE_DIR/sim.sai" \
-            "$READ1" \
-            2> "$OUTPUT_DIR/logs/${sample}_bwa_samse.log" | \
-        samtools sort -@ "$THREADS" -o "$OUTPUT_DIR/bams/${sample}.sorted.bam" -
-    fi
-
-    # index and stats
-    samtools index "$OUTPUT_DIR/bams/${sample}.sorted.bam"
-    samtools flagstat "$OUTPUT_DIR/bams/${sample}.sorted.bam" \
-        > "$OUTPUT_DIR/bams/${sample}.flagstat.txt"
-    
-    echo "   Complete: $OUTPUT_DIR/bams/${sample}.sorted.bam"
-    echo "   Sequence mapping saved: $MAPPING_LOG"
-    echo ""
-
-done < "$OUTPUT_DIR/temp/diploid_samples.txt"
-
-# small report
-echo "[$(date)] Generating summary report..."
-
-cat > "$OUTPUT_DIR/simulation_summary.txt" <<EOF
+cat > "$GLOBAL_SUMMARY" <<EOF
 AncestralSim Simulation Report
-==============================
+===============================
 Date: $(date)
-Input alleles: $ALLELES_FASTA
 Reference: $REFERENCE
-Gargammel directory: $GARGAMMEL_DIR
-Execution method: $(if [[ "$USE_SINGULARITY" == true ]]; then echo "Singularity"; else echo "Native/Conda"; fi)
+Region mapping: $REGION_MAP
 
-Simulation Parameters:
+Parameters:
 - Coverage: ${COVERAGE}x
 - Fragment length: ${FRAGMENT_LENGTH}bp
 - Read length: ${READ_LENGTH}bp
-- Library type: $LIBRARY_TYPE
-- Deamination type: $DEAMINATION-stranded
-- Contamination ratio: ${CONT_RATIO} (endogenous: ${ENDO_RATIO})
-- Number of diploid samples: $NDIPLOID
+- Library: $LIBRARY_TYPE
+- Deamination: $DEAMINATION
+- Contamination: ${CONT_RATIO}
+- Regions: $N_REGIONS
 
-Processing Steps:
-- Gargammel simulation with deamination
-- Adapter trimming with fastp (auto-detect)
-- BWA aln alignment
+Per-Region Details:
+====================
 
-Output Files:
-- BAM files: $OUTPUT_DIR/bams/*.sorted.bam
-- Sequence mappings: $OUTPUT_DIR/logs/*_sequence_mapping.txt
-- Gargammel logs: $OUTPUT_DIR/logs/*_gargammel.log
-- Fastp reports: $OUTPUT_DIR/logs/*_fastp.{json,html}
-
-Output BAM files:
 EOF
 
-ls -lh "$OUTPUT_DIR/bams/"*.bam >> "$OUTPUT_DIR/simulation_summary.txt"
+cat > "$MERGE_SCRIPT" <<'EOF'
+#!/bin/bash
+# Merge BAMs per sample across all regions
+
+set -e
+
+OUTPUT_DIR="$(dirname "$0")"
+MERGED_DIR="$OUTPUT_DIR/merged_bams"
+mkdir -p "$MERGED_DIR"
+
+echo "=== Merging BAMs per sample ==="
+echo "Output: $MERGED_DIR"
+echo ""
+
+EOF
+
+declare -A ALL_SAMPLES
+
+REGION_NUM=0
+while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
+    [[ "$TARGET_CHR" =~ ^#.*$ ]] && continue
+    [[ -z "$TARGET_CHR" || -z "$REGION_NAME" || -z "$ALLELES_FASTA" ]] && continue
+    
+    REGION_NUM=$((REGION_NUM + 1))
+    
+    echo "Processing region $REGION_NUM/$N_REGIONS: ${TARGET_CHR}/${REGION_NAME}"
+    
+    ALLELES_FASTA=$(realpath "$ALLELES_FASTA")
+    
+    if [[ ! -f "$ALLELES_FASTA" ]]; then
+        echo "WARNING: File not found: $ALLELES_FASTA, skipping"
+        echo ""
+        continue
+    fi
+    
+    REGION_OUTPUT="$OUTPUT_DIR/${TARGET_CHR}/${REGION_NAME}"
+    mkdir -p "$REGION_OUTPUT"/{logs,temp,bams}
+    
+    CHROM_REFERENCE="$OUTPUT_DIR/${TARGET_CHR}/reference_${TARGET_CHR}.fa"
+    
+    if [[ -z "${CHR_EXTRACTED[$TARGET_CHR]}" ]]; then
+        echo "Extracting chromosome ${TARGET_CHR}..."
+        mkdir -p "$OUTPUT_DIR/${TARGET_CHR}"
+        samtools faidx "$REFERENCE" "$TARGET_CHR" > "$CHROM_REFERENCE"
+        
+        if [[ ! -s "$CHROM_REFERENCE" ]]; then
+            echo "ERROR: Failed to extract $TARGET_CHR, skipping"
+            echo ""
+            continue
+        fi
+        
+        echo "Indexing ${TARGET_CHR} with BWA..."
+        bwa index "$CHROM_REFERENCE"
+        samtools faidx "$CHROM_REFERENCE"
+        
+        CHR_EXTRACTED[$TARGET_CHR]=1
+    fi
+    
+    ALIGN_REFERENCE="$CHROM_REFERENCE"
+    
+    if [[ ! -f "${ALLELES_FASTA}.fai" ]]; then
+        samtools faidx "$ALLELES_FASTA"
+    fi
+    FAI_FILE="${ALLELES_FASTA}.fai"
+    
+    # Identify diploid samples (2 alleles per sample)
+    awk -F'[#\t]' '{print $1}' "$FAI_FILE" | sort | uniq -c | \
+    awk '$1==2 {print $2}' > "$REGION_OUTPUT/temp/diploid_samples.txt"
+    NDIPLOID=$(wc -l < "$REGION_OUTPUT/temp/diploid_samples.txt")
+    
+    if [[ $NDIPLOID -eq 0 ]]; then
+        echo "WARNING: No diploid samples found, skipping"
+        echo ""
+        continue
+    fi
+    
+    echo "Found ${NDIPLOID} diploid samples"
+    echo ""
+    
+    while IFS= read -r sample; do
+        ALL_SAMPLES[$sample]=1
+    done < "$REGION_OUTPUT/temp/diploid_samples.txt"
+    
+    cat >> "$GLOBAL_SUMMARY" <<EOF
+${TARGET_CHR}/${REGION_NAME}: $NDIPLOID samples
+  Alleles: $ALLELES_FASTA
+  Output: $REGION_OUTPUT/bams/
+
+EOF
+    
+    while IFS= read -r sample; do
+        echo "  Sample: ${sample}"
+        SAMPLE_DIR="$REGION_OUTPUT/temp/${sample}"
+        mkdir -p "$SAMPLE_DIR"/{endo,cont,bact}
+        
+        MAPPING_LOG="$REGION_OUTPUT/logs/${sample}_sequence_mapping.txt"
+        echo "Sample: ${sample} | Chromosome: ${TARGET_CHR} | Region: ${REGION_NAME}" > "$MAPPING_LOG"
+        echo "Date: $(date)" >> "$MAPPING_LOG"
+        echo "" >> "$MAPPING_LOG"
+
+        ENDO_HAP1_ORIG=$(grep "^${sample}#1#" "$FAI_FILE" | cut -f1)
+        ENDO_HAP2_ORIG=$(grep "^${sample}#2#" "$FAI_FILE" | cut -f1)
+        
+        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
+            sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap1.fa"
+        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP2_ORIG" | \
+            sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap2.fa"
+        
+        echo "[ENDOGENOUS]" >> "$MAPPING_LOG"
+        echo "hap1.fa <- $ENDO_HAP1_ORIG" >> "$MAPPING_LOG"
+        echo "hap2.fa <- $ENDO_HAP2_ORIG" >> "$MAPPING_LOG"
+        echo "" >> "$MAPPING_LOG"
+
+        if (( $(echo "$CONT_RATIO > 0" | bc -l) )); then
+            OTHER_SAMPLES=$(grep -v "^${sample}$" "$REGION_OUTPUT/temp/diploid_samples.txt")
+            
+            if [[ -n "$OTHER_SAMPLES" ]]; then
+                CONT_SAMPLE=$(echo "$OTHER_SAMPLES" | shuf -n 1)
+            else
+                CONT_SAMPLE="$sample"
+            fi
+            
+            CONT_HAP1_ORIG=$(grep "^${CONT_SAMPLE}#1#" "$FAI_FILE" | cut -f1)
+            CONT_HAP2_ORIG=$(grep "^${CONT_SAMPLE}#2#" "$FAI_FILE" | cut -f1)
+            
+            samtools faidx "$ALLELES_FASTA" "$CONT_HAP1_ORIG" | \
+                sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/cont_hap1.fa"
+            samtools faidx "$ALLELES_FASTA" "$CONT_HAP2_ORIG" | \
+                sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/cont_hap2.fa"
+            
+            echo "[CONTAMINANT] - ${CONT_SAMPLE}" >> "$MAPPING_LOG"
+            echo "cont_hap1.fa <- $CONT_HAP1_ORIG" >> "$MAPPING_LOG"
+            echo "cont_hap2.fa <- $CONT_HAP2_ORIG" >> "$MAPPING_LOG"
+            echo "" >> "$MAPPING_LOG"
+        else
+            samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
+                sed "s/^>.*/>chr_cont/" > "$SAMPLE_DIR/cont/dummy.fa"
+            echo "[CONTAMINANT] - None" >> "$MAPPING_LOG"
+            echo "" >> "$MAPPING_LOG"
+        fi
+
+        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
+            sed "s/^>.*/>chr_bact/" > "$SAMPLE_DIR/bact/dummy.fa"
+        echo "[BACTERIAL] - None" >> "$MAPPING_LOG"
+        echo "" >> "$MAPPING_LOG"
+
+        GARGAMMEL_RUN="$GARGAMMEL_CMD \
+            -c $COVERAGE \
+            --comp 0,$CONT_RATIO,$ENDO_RATIO \
+            -l $FRAGMENT_LENGTH \
+            -rl $READ_LENGTH \
+            -o $SAMPLE_DIR/sim"
+        
+        if [[ -n "$DEAM_RATE" ]]; then
+            GARGAMMEL_RUN="$GARGAMMEL_RUN -damage $DEAM_RATE"
+        else
+            if [[ "$DEAMINATION" == "single" ]]; then
+                MATRIX="$MATRIX_SINGLE"
+            else
+                MATRIX="$MATRIX_DOUBLE"
+            fi
+            GARGAMMEL_RUN="$GARGAMMEL_RUN -matfile $MATRIX"
+        fi
+        
+        if [[ "$LIBRARY_TYPE" == "se" ]]; then
+            GARGAMMEL_RUN="$GARGAMMEL_RUN -se"
+        fi
+        
+        GARGAMMEL_RUN="$GARGAMMEL_RUN $SAMPLE_DIR"
+        eval $GARGAMMEL_RUN > "$REGION_OUTPUT/logs/${sample}_gargammel.log" 2>&1
+
+        if [[ "$LIBRARY_TYPE" == "pe" ]]; then
+            fastp \
+                --in1 "$SAMPLE_DIR/sim_s1.fq.gz" \
+                --in2 "$SAMPLE_DIR/sim_s2.fq.gz" \
+                --out1 "$SAMPLE_DIR/sim_s1_trimmed.fq.gz" \
+                --out2 "$SAMPLE_DIR/sim_s2_trimmed.fq.gz" \
+                --detect_adapter_for_pe \
+                --thread "$THREADS" \
+                --length_required 25 \
+                --json "$REGION_OUTPUT/logs/${sample}_fastp.json" \
+                --html "$REGION_OUTPUT/logs/${sample}_fastp.html" \
+                2> "$REGION_OUTPUT/logs/${sample}_fastp.log"
+            
+            READ1="$SAMPLE_DIR/sim_s1_trimmed.fq.gz"
+            READ2="$SAMPLE_DIR/sim_s2_trimmed.fq.gz"
+        else
+            fastp \
+                --in1 "$SAMPLE_DIR/sim_s.fq.gz" \
+                --out1 "$SAMPLE_DIR/sim_s_trimmed.fq.gz" \
+                --thread "$THREADS" \
+                --length_required 25 \
+                --json "$REGION_OUTPUT/logs/${sample}_fastp.json" \
+                --html "$REGION_OUTPUT/logs/${sample}_fastp.html" \
+                --adapter_sequence AGATCGGAAGAGCACACGTCTGAACTCCAG \
+                2> "$REGION_OUTPUT/logs/${sample}_fastp.log"
+            
+            READ1="$SAMPLE_DIR/sim_s_trimmed.fq.gz"
+        fi
+
+        if [[ "$LIBRARY_TYPE" == "pe" ]]; then
+            bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                "$ALIGN_REFERENCE" "$READ1" \
+                > "$SAMPLE_DIR/sim_1.sai" \
+                2> "$REGION_OUTPUT/logs/${sample}_bwa_aln_1.log"
+            
+            bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                "$ALIGN_REFERENCE" "$READ2" \
+                > "$SAMPLE_DIR/sim_2.sai" \
+                2> "$REGION_OUTPUT/logs/${sample}_bwa_aln_2.log"
+            
+            bwa sampe "$ALIGN_REFERENCE" \
+                "$SAMPLE_DIR/sim_1.sai" "$SAMPLE_DIR/sim_2.sai" \
+                "$READ1" "$READ2" \
+                2> "$REGION_OUTPUT/logs/${sample}_bwa_sampe.log" | \
+            samtools sort -@ "$THREADS" \
+                -o "$REGION_OUTPUT/bams/${sample}.sorted.bam" -
+        else
+            bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                "$ALIGN_REFERENCE" "$READ1" \
+                > "$SAMPLE_DIR/sim.sai" \
+                2> "$REGION_OUTPUT/logs/${sample}_bwa_aln.log"
+            
+            bwa samse "$ALIGN_REFERENCE" \
+                "$SAMPLE_DIR/sim.sai" "$READ1" \
+                2> "$REGION_OUTPUT/logs/${sample}_bwa_samse.log" | \
+            samtools sort -@ "$THREADS" \
+                -o "$REGION_OUTPUT/bams/${sample}.sorted.bam" -
+        fi
+
+        samtools index "$REGION_OUTPUT/bams/${sample}.sorted.bam"
+        samtools flagstat "$REGION_OUTPUT/bams/${sample}.sorted.bam" \
+            > "$REGION_OUTPUT/bams/${sample}.flagstat.txt"
+
+    done < "$REGION_OUTPUT/temp/diploid_samples.txt"
+    
+    cat > "$REGION_OUTPUT/region_summary.txt" <<EOF
+Region: ${TARGET_CHR}/${REGION_NAME}
+Date: $(date)
+Alleles: $ALLELES_FASTA
+Diploid samples: $NDIPLOID
+BAM files: $REGION_OUTPUT/bams/
+EOF
+    
+    echo ""
+    
+done < "$REGION_MAP"
+
+echo "" >> "$MERGE_SCRIPT"
+
+for sample in "${!ALL_SAMPLES[@]}"; do
+    cat >> "$MERGE_SCRIPT" <<EOF
+
+echo "Merging: $sample"
+SAMPLE_BAMS=()
+EOF
+    
+    while IFS=$'\t' read -r chr region _; do
+        [[ "$chr" =~ ^#.*$ ]] && continue
+        [[ -z "$chr" || -z "$region" ]] && continue
+        
+        cat >> "$MERGE_SCRIPT" <<EOF
+[[ -f "\$OUTPUT_DIR/${chr}/${region}/bams/${sample}.sorted.bam" ]] && SAMPLE_BAMS+=("\$OUTPUT_DIR/${chr}/${region}/bams/${sample}.sorted.bam")
+EOF
+    done < "$REGION_MAP"
+    
+    cat >> "$MERGE_SCRIPT" <<EOF
+
+if [[ \${#SAMPLE_BAMS[@]} -gt 1 ]]; then
+    samtools merge -@ 4 "\$MERGED_DIR/${sample}.merged.bam" "\${SAMPLE_BAMS[@]}"
+    samtools index "\$MERGED_DIR/${sample}.merged.bam"
+    echo "  \${#SAMPLE_BAMS[@]} BAMs -> ${sample}.merged.bam"
+elif [[ \${#SAMPLE_BAMS[@]} -eq 1 ]]; then
+    cp "\${SAMPLE_BAMS[0]}" "\$MERGED_DIR/${sample}.merged.bam"
+    samtools index "\$MERGED_DIR/${sample}.merged.bam"
+    echo "  1 BAM -> ${sample}.merged.bam"
+else
+    echo "  WARNING: No BAMs found"
+fi
+EOF
+done
+
+cat >> "$MERGE_SCRIPT" <<'EOF'
 
 echo ""
+echo "=== Complete ==="
+echo "Merged BAMs: $MERGED_DIR"
+EOF
+
+chmod +x "$MERGE_SCRIPT"
+
+cat >> "$GLOBAL_SUMMARY" <<EOF
+
+Summary:
+=========
+Regions processed: $REGION_NUM
+Unique samples: ${#ALL_SAMPLES[@]}
+
+To merge BAMs per sample:
+  bash $MERGE_SCRIPT
+
+EOF
+
 echo "=== AncestralSim Complete ==="
-echo "Output directory: $OUTPUT_DIR"
-echo "BAM files: $OUTPUT_DIR/bams/"
-echo "Sequence mappings: $OUTPUT_DIR/logs/*_sequence_mapping.txt"
-echo "Fastp reports: $OUTPUT_DIR/logs/*_fastp.html"
-echo "Summary: $OUTPUT_DIR/simulation_summary.txt"
+echo "Regions: $REGION_NUM | Samples: ${#ALL_SAMPLES[@]}"
+echo "Output: $OUTPUT_DIR"
+echo "Merge: bash $MERGE_SCRIPT"
+echo ""
 
