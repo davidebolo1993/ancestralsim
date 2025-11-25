@@ -51,46 +51,58 @@ When using this `singularity` container, you need to also have `bwa`, `fastp` an
 ./ancestralsim.sh -h
 
 # Basic usage
-./ancestralsim.sh \
-  -f test/allele/chr22_39095117_39122647.fasta.gz \
-  -r test/chr/chr22.fa.gz \
-  -g ./gargammel \
+./ancestralsim.sh
+  -r reference/GRCh38.fa
+  -g ./gargammel
+  -b region_mapping.tsv
 
 # Increasing 0.5X coverage, increase modern-human contamination to 15%, simulate a single-end short-read library
-./ancestralsim.sh \
-  -f test/allele/chr22_39095117_39122647.fasta.gz \
-  -r test/chr/chr22.fa.gz \
-  -g ./gargammel \
-  -c 1.0 \
-  --cont-ratio 0.15 \
-  -L se \
-  -o test_output
+./ancestralsim.sh
+  -r reference/GRCh38.fa
+  -g ./gargammel
+  -b region_mapping.tsv
+  -c 1.0
+  --cont-ratio 0.15
+  -o simulation_output
 ```
 
 ## Usage
 
 ```
-Usage: ancestralsim.sh -f <alleles.fasta> -r <reference.fa> -g <gargammel_dir> [options]
+Usage: ancestralsim.sh -r <reference.fa> -g <gargammel_dir> -b <region_mapping.tsv> [options]
 
 Required:
-  -f FILE     Input FASTA file with pangenome alleles (can be gzipped)
-  -r FILE     Reference chromosome FASTA for alignment
-  -g DIR      Path to gargammel installation directory
+-r FILE Reference genome FASTA
+-g DIR Path to gargammel installation directory
+-b FILE TSV mapping regions to alleles (chr<TAB>region_name<TAB>fasta_path)
 
 Optional:
-  -c FLOAT    Target coverage (default 0.5)
-  -l INT      Mean fragment length (default 45)
-  -R INT      Read length (default 75)
-  -L TYPE     Library type: se|pe (default pe)
-  -d TYPE     Deamination type: single|double (default single)
-  --deam-rate "VALS"  Custom deam rates like "0.03,0.4,0.01,0.3"
-  --cont-ratio FLOAT  Exogenous DNA ratio (default 0.1)
-  -o DIR      Output directory (default output)
-  -t INT      Threads (default 4)
-  -h          Show this help
+-c FLOAT Target coverage (default 0.5)
+-l INT Mean fragment length (default 70)
+-R INT Read length (default 100)
+-L TYPE Library type: se|pe (default pe)
+-d TYPE Deamination type: single|double (default single)
+--deam-rate "VALS" Custom deam rates like "0.03,0.4,0.01,0.3"
+--cont-ratio FLOAT Exogenous DNA ratio (default 0.1)
+-o DIR Output directory (default output)
+-t INT Threads (default 4)
+-h Show this help
 ```
 
 ## Input Format
+
+### Region Mapping File
+
+Tab-separated file specifying chromosome, region name, and path to alleles FASTA:
+
+```tsv
+chr1  CYP2J2  /path/to/chr1_region1.fasta.gz
+chr1  MUC1  /path/to/chr1_region2.fasta.gz
+chr17 BRCA1 /path/to/chr17_region1.fasta.gz
+chr22 CYP2D6  /path/to/chr22_region1.fasta.gz
+```
+
+### Alleles FASTA Format
 
 The input FASTA file must contain diploid samples with headers in the format:
 
@@ -118,27 +130,48 @@ The pipeline generates:
 
 ```
 output/
-├── bams/
-│   ├── SAMPLE1.sorted.bam
-│   ├── SAMPLE1.sorted.bam.bai
-│   ├── SAMPLE1.flagstat.txt
-│   └── ...
-├── logs/
-│   ├── SAMPLE1_sequence_mapping.txt
-│   ├── SAMPLE1_gargammel.log
-│   ├── SAMPLE1_bwa_aln_1.log
-│   └── ...
-├── temp/
-│   └── (intermediate files)
-└── simulation_summary.txt
+├── chr1/
+│ ├── reference_chr1.fa # Extracted chromosome reference
+│ ├── CYP2J2/
+│ │ ├── bams/
+│ │ │ ├── HG00096.sorted.bam
+│ │ │ ├── HG00096.sorted.bam.bai
+│ │ │ └── HG00096.flagstat.txt
+│ │ ├── logs/
+│ │ │ ├── HG00096_sequence_mapping.txt
+│ │ │ ├── HG00096_gargammel.log
+│ │ │ └── HG00096_fastp.html
+│ │ └── region_summary.txt
+│ └── MUC1/
+│ └── (same structure)
+├── chr17/
+│ └── BRCA1/
+│ └── (same structure)
+├── merged_bams/ # Created after running merge script
+│ ├── HG00096.merged.bam # Reads from all regions
+│ └── HG00097.merged.bam
+├── merge_commands.sh # Auto-generated merge script
+└── global_simulation_summary.txt
 ```
 
 ### Key Output Files
 
-- **`bams/*.sorted.bam`**: Aligned aDNA reads in BAM format
-- **`logs/*_sequence_mapping.txt`**: Maps simulated sequences back to original haplotype names
-- **`logs/*_gargammel.log`**: Gargammel simulation logs
-- **`simulation_summary.txt`**: Overall simulation statistics
+- **`chr*/region/bams/*.sorted.bam`**: Per-region aligned aDNA reads
+- **`merged_bams/*.merged.bam`**: Per-sample BAMs merged across all regions
+- **`logs/*_sequence_mapping.txt`**: Maps simulated sequences to original haplotype names
+- **`logs/*_fastp.html`**: Adapter trimming quality reports
+- **`merge_commands.sh`**: Script to merge per-region BAMs into per-sample BAMs
+
+## Merging BAMs Across Regions
+
+After simulation completes, merge per-region BAMs into single BAM files per sample:
+
+```
+bash output/merge_commands.sh
+```
+
+This creates `output/merged_bams/SAMPLE.merged.bam` files containing reads from all simulated regions.
+
 
 ## Parameters Guide
 
@@ -164,7 +197,6 @@ Proportion of exogenous human DNA contamination (0.0-1.0):
 
 As mentioned above, the pipeline randomly selects a different diploid sample as the contaminant source.
 
-
 ## Citation
 
 If you use ancestralsim in your research, please cite the gargammel paper:
@@ -186,3 +218,4 @@ For issues, questions, or suggestions, please open an issue on [GitHub](https://
 ## Author
 
 Davide Bolognini ([@davidebolo1993](https://github.com/davidebolo1993))
+(/
