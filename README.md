@@ -218,4 +218,3 @@ For issues, questions, or suggestions, please open an issue on [GitHub](https://
 ## Author
 
 Davide Bolognini ([@davidebolo1993](https://github.com/davidebolo1993))
-(/
