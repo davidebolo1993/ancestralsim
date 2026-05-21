@@ -1,241 +1,146 @@
 # ancestralsim
 
-Simulate ancient DNA (aDNA) reads from pangenome haplotypes
+Simulate ancient DNA (aDNA) reads from pangenome haplotypes.
 
 ## Overview
 
-`ancestralsim` is a pipeline for simulating ancient DNA sequencing reads from locus-specific pangenome haplotypes. It uses [gargammel](https://github.com/grenaud/gargammel) to generate realistic aDNA reads with authentic damage patterns, fragmentation, and contamination profiles, then aligns them to a reference chromosome using BWA.
+`ancestralsim` simulates aDNA sequencing reads from locus-specific diploid pangenome haplotypes. It uses [gargammel](https://github.com/grenaud/gargammel) for fragmentation, deamination, contamination, and Illumina read simulation, and can optionally use [msprime](https://tskit.dev/msprime/docs/stable/intro.html) to add extra terminal-branch or split-demography divergence before read simulation. Reads are trimmed with `fastp` and aligned to the reference chromosome with BWA.
 
-## Features
+Optional modules add:
 
-- **Pangenome-based simulation**: Works with diploid samples from pangenome FASTA files
-- **Realistic aDNA characteristics**: 
-  - Configurable DNA fragment lengths (typical aDNA: ~45bp)
-  - Single or double-stranded deamination patterns
-  - C-to-T transitions at fragment ends
-- **Contamination modeling**: Simulate exogenous human DNA contamination from other samples
-- **Flexible sequencing**: Single-end (SE) or paired-end (PE) library support
-- **Reference controls**: Add a haploid reference control interval (`chr:start-end`) to every sample
-- **Optional extra divergence**: Use msprime-modeled substitutions to make selected pangenome haplotypes slightly more diverged before aDNA read simulation
+- haploid reference control-region simulation,
+- msprime-modeled extra divergence before read simulation,
+- per-sample BAM merging across loci and controls.
+
+## Documentation
+
+Detailed documentation lives in [docs/](docs/README.md):
+
+- [Inputs](docs/inputs.md): mapping file and PanSN FASTA requirements.
+- [Core Simulation](docs/simulation.md): what happens for each locus/sample.
+- [Control Regions](docs/control_regions.md): `--control-region` behavior and outputs.
+- [Divergence](docs/divergence.md): terminal and split-demography divergence modes.
+- [Outputs](docs/outputs.md): output layout and reports.
+- [Example Scenarios](docs/examples.md): example commands and revision conditions.
 
 ## Installation
 
-### Clone
+Clone recursively:
 
 ```bash
 git clone --recursive https://github.com/davidebolo1993/ancestralsim.git
 cd ancestralsim
 ```
 
-### Using conda/mamba (recommended)
+Create the conda environment:
 
 ```bash
 ENV_PATH="/path/to/environment/installation/directory"
-mamba env create -f environment.yml -p $ENV_PATH
+mamba env create -f environment.yml -p "$ENV_PATH"
+```
 
-# If your gargammel build needs the older GSL SONAME:
-cd $ENV_PATH/lib
+If your gargammel build needs the older GSL SONAME:
+
+```bash
+cd "$ENV_PATH/lib"
 ln -s libgsl.so.27 libgsl.so.25 2>/dev/null || true
 cd -
 ```
 
 ## Quick Start
 
+Show help:
+
 ```bash
-#Help
 ./ancestralsim.sh -h
+```
 
-# Basic usage
-./ancestralsim.sh
-  -r reference/GRCh38.fa
-  -g ./gargammel
-  -b region_mapping.tsv
+Basic run:
 
-# Increasing 0.5X coverage, increase modern-human contamination to 15%, simulate a single-end short-read library
-./ancestralsim.sh
-  -r reference/GRCh38.fa
-  -g ./gargammel
-  -b region_mapping.tsv
-  -c 1.0
-  --cont-ratio 0.15
+```bash
+./ancestralsim.sh \
+  -r reference/GRCh38.fa \
+  -g ./gargammel \
+  -b region_mapping.tsv \
   -o simulation_output
+```
 
-# Add a haploid reference control region and extra msprime-modeled divergence
-./ancestralsim.sh
-  -r reference/GRCh38.fa
-  -g ./gargammel
-  -b region_mapping.tsv
-  --control-region chr1:1000000-1050000
-  --control-name neutral_control
-  --diverge
-  --divergence-years 6000
-  --generation-time 29
-  --seed 13
+Run with a control region and split-demography divergence:
+
+```bash
+./ancestralsim.sh \
+  -r reference/GRCh38.fa \
+  -g ./gargammel \
+  -b region_mapping.tsv \
+  --control-region chr1:1000000-1050000 \
+  --control-name neutral_control \
+  --diverge \
+  --divergence-mode split \
+  --divergence-years 5000 \
+  --split-years 20000 \
+  --generation-time 29 \
+  --modern-ne 10000 \
+  --ancient-ne 10000 \
+  --ancestral-ne 10000 \
   -o simulation_output
+```
+
+Merge per-region BAMs after simulation:
+
+```bash
+bash simulation_output/merge_commands.sh
 ```
 
 ## Usage
 
-```
+```text
 Usage: ancestralsim.sh -r <reference.fa> -g <gargammel_dir> -b <region_mapping.tsv> [options]
+```
 
 Required:
--r FILE Reference genome FASTA
--g DIR Path to gargammel installation directory
--b FILE TSV mapping regions to alleles (chr<TAB>region_name<TAB>fasta_path)
 
-Optional:
--c FLOAT Target coverage (default 0.5)
--l INT Mean fragment length (default 70)
--R INT Read length (default 100)
--L TYPE Library type: se|pe (default pe)
--d TYPE Deamination type: single|double (default single)
---deam-rate "VALS" Custom deam rates like "0.03,0.4,0.01,0.3"
---cont-ratio FLOAT Exogenous DNA ratio (default 0.1)
---control-region REGION Haploid reference control region chr:start-end
---control-name NAME Name for control-region outputs (default control)
---diverge Add msprime-modeled divergence to endogenous haplotypes
---divergence-rate FLOAT Mutation rate per bp per generation (default 1.25e-8)
---divergence-generations INT Terminal branch length in generations (default 1000)
---divergence-years FLOAT Sample age/divergence time in years before present
---generation-time FLOAT Years per generation for --divergence-years (default 29)
---divergence-model MODEL Mutation model: jc69 (default jc69)
---seed INT Seed for reproducible divergence
--o DIR Output directory (default output)
--t INT Threads (default 4)
--h Show this help
-```
+- `-r FILE`: reference genome FASTA.
+- `-g DIR`: gargammel directory, used for matrices and local assets.
+- `-b FILE`: region mapping TSV.
 
-## Input Format
+Common options:
 
-### Region Mapping File
+- `-c FLOAT`: target endogenous coverage, default `0.5`.
+- `-l INT`: mean fragment length, default `70`.
+- `-R INT`: read length, default `100`.
+- `-L se|pe`: library type, default `pe`.
+- `-d single|double`: deamination profile, default `single`.
+- `--cont-ratio FLOAT`: modern-human contamination ratio, default `0.1`.
+- `--control-region chr:start-end`: add a haploid reference control interval.
+- `--diverge`: enable extra divergence before read simulation.
+- `--divergence-mode terminal|split`: divergence model, default `terminal`.
+- `--divergence-years FLOAT`: ancient sample age in years.
+- `--split-years FLOAT`: population split time in years for split mode.
+- `--modern-ne`, `--ancient-ne`, `--ancestral-ne`: split-mode effective population sizes.
+- `-o DIR`: output directory, default `output`.
+- `-t INT`: threads, default `4`.
 
-Tab-separated file specifying chromosome, region name, and path to alleles FASTA:
+Run `./ancestralsim.sh -h` for the full option list.
+
+## Minimal Input Example
+
+Region mapping TSV:
 
 ```tsv
-chr1  CYP2J2  /path/to/chr1_region1.fasta.gz
-chr1  MUC1  /path/to/chr1_region2.fasta.gz
-chr17 BRCA1 /path/to/chr17_region1.fasta.gz
-chr22 CYP2D6  /path/to/chr22_region1.fasta.gz
+chr1    CYP2J2  /path/to/chr1_CYP2J2.fasta.gz
+chr17   BRCA1   /path/to/chr17_BRCA1.fasta.gz
 ```
 
-### Alleles FASTA Format
+Haplotype FASTA headers:
 
-The input FASTA file must contain diploid samples with headers in the format:
-
-```
->SAMPLE_ID#HAPLOTYPE#CHROMOSOME
-```
-
-Example:
-```
+```text
 >HG00096#1#chr1
-ACGTACGTACGT...
+ACGT...
 >HG00096#2#chr1
-ACGTACGTACGT...
->HG00097#1#chr1
-ACGTACGTACGT...
->HG00097#2#chr1
-ACGTACGTACGT...
+ACGT...
 ```
 
-The pipeline automatically identifies diploid samples (those with both haplotype #1 and #2) and while it uses a diploid sample for simulation of aDNA reads, another random diploid sample from the same set is used to simulate modern-day contaminants. 
-
-When `--diverge` is used, the selected endogenous haplotype headers are validated against this PanSN-style `sample#haplotype#contig` convention. The pipeline writes a per-sample `diverged_haplotypes.pansn.fa` preserving those headers, and also writes gargammel-ready copies with a shared internal chromosome name because gargammel expects the two endogenous FASTA files to contain matching sequence names.
-
-## Output
-
-The pipeline generates:
-
-```
-output/
-├── chr1/
-│ ├── reference_chr1.fa # Extracted chromosome reference
-│ ├── CYP2J2/
-│ │ ├── bams/
-│ │ │ ├── HG00096.sorted.bam
-│ │ │ ├── HG00096.sorted.bam.bai
-│ │ │ └── HG00096.flagstat.txt
-│ │ ├── logs/
-│ │ │ ├── HG00096_sequence_mapping.txt
-│ │ │ ├── HG00096_gargammel.log
-│ │ │ ├── HG00096_divergence.tsv # Only with --diverge
-│ │ │ └── HG00096_fastp.html
-│ │ └── region_summary.txt
-│ └── MUC1/
-│ └── (same structure)
-├── chr1/
-│ └── neutral_control/ # Only with --control-region
-│ ├── neutral_control.pansn.fa
-│ └── bams/
-├── chr17/
-│ └── BRCA1/
-│ └── (same structure)
-├── merged_bams/ # Created after running merge script
-│ ├── HG00096.merged.bam # Reads from all regions
-│ └── HG00097.merged.bam
-├── merge_commands.sh # Auto-generated merge script
-└── global_simulation_summary.txt
-```
-
-### Key Output Files
-
-- **`chr*/region/bams/*.sorted.bam`**: Per-region aligned aDNA reads
-- **`merged_bams/*.merged.bam`**: Per-sample BAMs merged across all regions
-- **`logs/*_sequence_mapping.txt`**: Maps simulated sequences to original haplotype names
-- **`logs/*_divergence.tsv`**: Expected and applied divergence mutations per haplotype when `--diverge` is enabled
-- **`temp/*/diverged_haplotypes.pansn.fa`**: Diverged haplotypes with original PanSN headers
-- **`logs/*_fastp.html`**: Adapter trimming quality reports
-- **`merge_commands.sh`**: Script to merge per-region BAMs into per-sample BAMs
-
-## Merging BAMs Across Regions
-
-After simulation completes, merge per-region BAMs into single BAM files per sample:
-
-```
-bash output/merge_commands.sh
-```
-
-This creates `output/merged_bams/SAMPLE.merged.bam` files containing reads from all simulated regions.
-
-
-## Parameters Guide
-
-### Coverage (`-c`)
-Target sequencing coverage. For aDNA studies, typical values range from 0.1x to 2x.
-
-### Fragment Length (`-l`)
-Mean DNA fragment length. Ancient DNA is typically highly fragmented:
-- **Modern DNA**: 150-500bp
-- **Ancient DNA**: 30-80bp (mean ~45bp)
-
-### Deamination (`-d`)
-DNA damage patterns:
-- **`single`**: C-to-T deamination on one strand (partially treated with UDG)
-- **`double`**: C-to-T on both strands (non-UDG treated)
-
-### Contamination (`--cont-ratio`)
-Proportion of exogenous human DNA contamination (0.0-1.0):
-- **0.0**: No contamination
-- **0.1**: 10% contamination (typical for well-preserved samples)
-- **0.3**: 30% contamination (moderate)
-- **0.5+**: High contamination (challenging samples)
-
-As mentioned above, the pipeline randomly selects a different diploid sample as the contaminant source.
-
-### Control Region (`--control-region`)
-Provide a reference interval as `chr:start-end` to simulate an additional haploid reference control for every sample. The control uses the same coverage, fragment length, read length, library type, deamination settings, and contamination ratio as the main loci. Coverage is computed from the haploid reference interval in `endo/`, so `-c 0.5` means 0.5x expected endogenous coverage over that control interval.
-
-### Extra Divergence (`--diverge`)
-Use `--diverge` to add extra substitutions to the selected endogenous haplotypes before gargammel simulates damaged reads. The default is a JC69 mutation process with `--divergence-rate 1.25e-8` per bp per generation and `--divergence-generations 1000`, giving an expected extra divergence of approximately `rate * generations` per callable base. You can also specify archaeological time directly with `--divergence-years` and `--generation-time`; for example, `--divergence-years 6000 --generation-time 29` is converted to about 207 generations. `--divergence-generations` and `--divergence-years` are mutually exclusive.
-
-For human nuclear DNA, a reasonable biological mutation-rate range is about `1.0e-8` to `1.4e-8` per bp per generation, with `1.25e-8` as a practical default. The expected number of added substitutions per haplotype is:
-
-```
-haplotype_length_bp * divergence_rate * divergence_years / generation_time
-```
-
-This means real-time divergence can be very subtle for short loci. At `1.25e-8` and 29 years/generation, a 6000-year-old sample gives about one expected extra mutation per 386 kb. If your selected haplotypes are only 10-50 kb, most haplotypes will often receive zero extra substitutions. For benchmarking sensitivity rather than strict biological realism, increase `--divergence-rate`, `--divergence-years`, or use larger target regions until the expected count is in the range you want.
+See [Inputs](docs/inputs.md) for full details.
 
 ## Citation
 
@@ -246,15 +151,7 @@ If you use ancestralsim in your research, please cite the relevant simulator pap
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-For issues, questions, or suggestions, please open an issue on [GitHub](https://github.com/davidebolo1993/ancestralsim/issues).
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Author
 

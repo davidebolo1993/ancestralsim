@@ -23,6 +23,14 @@ DIVERGENCE_GENERATIONS_SET=false
 DIVERGENCE_YEARS=""
 GENERATION_TIME=29
 DIVERGENCE_MODEL="jc69"
+DIVERGENCE_MODE="terminal"
+SPLIT_GENERATIONS=""
+SPLIT_YEARS=""
+EFFECTIVE_POP_SIZE=10000
+MODERN_NE=""
+ANCIENT_NE=""
+ANCESTRAL_NE=""
+RECOMBINATION_RATE="1e-8"
 SEED=""
 
 usage() {
@@ -50,6 +58,14 @@ Optional:
   --divergence-generations INT  Terminal branch length in generations (default 1000)
   --divergence-years FLOAT      Sample age/divergence time in years before present
   --generation-time FLOAT       Years per generation for --divergence-years (default 29)
+  --divergence-mode MODE        terminal|split (default terminal)
+  --split-generations FLOAT     Population split time in generations (split mode)
+  --split-years FLOAT           Population split time in years before present (split mode)
+  --effective-pop-size FLOAT    Set all split-mode Ne values (default 10000)
+  --modern-ne FLOAT             Modern population Ne for split mode (default: --effective-pop-size)
+  --ancient-ne FLOAT            Ancient population Ne for split mode (default: --effective-pop-size)
+  --ancestral-ne FLOAT          Ancestral population Ne for split mode (default: --effective-pop-size)
+  --recombination-rate FLOAT    Recombination rate for split mode (default 1e-8)
   --divergence-model MODEL     Mutation model: jc69 (default jc69)
   --seed INT             Seed for reproducible divergence
   -o DIR      Output directory (default output)
@@ -79,6 +95,14 @@ while [[ $# -gt 0 ]]; do
         --divergence-generations) DIVERGENCE_GENERATIONS="$2"; DIVERGENCE_GENERATIONS_SET=true; shift 2 ;;
         --divergence-years) DIVERGENCE_YEARS="$2"; shift 2 ;;
         --generation-time) GENERATION_TIME="$2"; shift 2 ;;
+        --divergence-mode) DIVERGENCE_MODE="$2"; shift 2 ;;
+        --split-generations) SPLIT_GENERATIONS="$2"; shift 2 ;;
+        --split-years) SPLIT_YEARS="$2"; shift 2 ;;
+        --effective-pop-size) EFFECTIVE_POP_SIZE="$2"; shift 2 ;;
+        --modern-ne) MODERN_NE="$2"; shift 2 ;;
+        --ancient-ne) ANCIENT_NE="$2"; shift 2 ;;
+        --ancestral-ne) ANCESTRAL_NE="$2"; shift 2 ;;
+        --recombination-rate) RECOMBINATION_RATE="$2"; shift 2 ;;
         --divergence-model) DIVERGENCE_MODEL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         -o) OUTPUT_DIR="$2"; shift 2 ;;
@@ -136,9 +160,16 @@ if (( $(echo "$CONT_RATIO < 0" | bc -l) )) || (( $(echo "$CONT_RATIO > 1" | bc -
 fi
 
 ENDO_RATIO=$(python3 -c "print(round(1.0 - $CONT_RATIO, 6))")
+MODERN_NE="${MODERN_NE:-$EFFECTIVE_POP_SIZE}"
+ANCIENT_NE="${ANCIENT_NE:-$EFFECTIVE_POP_SIZE}"
+ANCESTRAL_NE="${ANCESTRAL_NE:-$EFFECTIVE_POP_SIZE}"
 
 if [[ "$DIVERGENCE_MODEL" != "jc69" ]]; then
     echo "Error: --divergence-model currently supports only 'jc69'"; exit 1
+fi
+
+if [[ "$DIVERGENCE_MODE" != "terminal" ]] && [[ "$DIVERGENCE_MODE" != "split" ]]; then
+    echo "Error: --divergence-mode must be 'terminal' or 'split'"; exit 1
 fi
 
 if [[ -n "$DIVERGENCE_YEARS" ]]; then
@@ -156,6 +187,51 @@ if generation_time <= 0:
 print(years / generation_time)
 PY
 )
+fi
+
+if [[ -n "$SPLIT_YEARS" ]]; then
+    if [[ -n "$SPLIT_GENERATIONS" ]]; then
+        echo "Error: use either --split-generations or --split-years, not both"; exit 1
+    fi
+    SPLIT_GENERATIONS=$(python3 - "$SPLIT_YEARS" "$GENERATION_TIME" <<'PY'
+import sys
+years = float(sys.argv[1])
+generation_time = float(sys.argv[2])
+if years < 0:
+    raise SystemExit("--split-years must be >= 0")
+if generation_time <= 0:
+    raise SystemExit("--generation-time must be > 0")
+print(years / generation_time)
+PY
+)
+fi
+
+if [[ "$DIVERGENCE_MODE" == "split" ]]; then
+    if [[ -z "$SPLIT_GENERATIONS" ]]; then
+        echo "Error: --divergence-mode split requires --split-generations or --split-years"; exit 1
+    fi
+    python3 - "$DIVERGENCE_GENERATIONS" "$SPLIT_GENERATIONS" "$MODERN_NE" "$ANCIENT_NE" "$ANCESTRAL_NE" "$RECOMBINATION_RATE" <<'PY'
+import sys
+sample_generations = float(sys.argv[1])
+split_generations = float(sys.argv[2])
+modern_ne = float(sys.argv[3])
+ancient_ne = float(sys.argv[4])
+ancestral_ne = float(sys.argv[5])
+recombination_rate = float(sys.argv[6])
+if split_generations <= sample_generations:
+    raise SystemExit("--split-generations/--split-years must be older than the ancient sample age")
+if modern_ne <= 0:
+    raise SystemExit("--modern-ne must be > 0")
+if ancient_ne <= 0:
+    raise SystemExit("--ancient-ne must be > 0")
+if ancestral_ne <= 0:
+    raise SystemExit("--ancestral-ne must be > 0")
+if recombination_rate < 0:
+    raise SystemExit("--recombination-rate must be >= 0")
+PY
+    if [[ $? -ne 0 ]]; then
+        exit 1
+    fi
 fi
 
 if [[ -n "$CONTROL_REGION" ]]; then
@@ -222,9 +298,12 @@ if [[ -n "$CONTROL_REGION" ]]; then
     echo "Control region: $CONTROL_REGION ($CONTROL_NAME)"
 fi
 if [[ "$DIVERGE" == true ]]; then
-    echo "Divergence: enabled, model=${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}"
+    echo "Divergence: enabled, mode=${DIVERGENCE_MODE}, model=${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}"
     if [[ -n "$DIVERGENCE_YEARS" ]]; then
         echo "Divergence years: ${DIVERGENCE_YEARS}, generation time: ${GENERATION_TIME}"
+    fi
+    if [[ "$DIVERGENCE_MODE" == "split" ]]; then
+        echo "Split: generations=${SPLIT_GENERATIONS}, modern Ne=${MODERN_NE}, ancient Ne=${ANCIENT_NE}, ancestral Ne=${ANCESTRAL_NE}, recombination=${RECOMBINATION_RATE}"
     fi
 fi
 echo ""
@@ -259,11 +338,19 @@ Parameters:
 - Contamination: ${CONT_RATIO}
 - Control region: ${CONTROL_REGION:-none}
 - Divergence: $DIVERGE
+- Divergence mode: $DIVERGENCE_MODE
 - Divergence model: $DIVERGENCE_MODEL
 - Divergence rate: $DIVERGENCE_RATE
 - Divergence generations: $DIVERGENCE_GENERATIONS
 - Divergence years: ${DIVERGENCE_YEARS:-none}
 - Generation time: $GENERATION_TIME
+- Split generations: ${SPLIT_GENERATIONS:-none}
+- Split years: ${SPLIT_YEARS:-none}
+- Effective population size: $EFFECTIVE_POP_SIZE
+- Modern Ne: $MODERN_NE
+- Ancient Ne: $ANCIENT_NE
+- Ancestral Ne: $ANCESTRAL_NE
+- Recombination rate: $RECOMBINATION_RATE
 - Regions: $N_REGIONS
 
 Per-Region Details:
@@ -384,11 +471,21 @@ EOF
                 --out-hap2 "$SAMPLE_DIR/endo/hap2.fa"
                 --pansn-output "$SAMPLE_DIR/diverged_haplotypes.pansn.fa"
                 --report "$REGION_OUTPUT/logs/${sample}_divergence.tsv"
+                --mutation-report "$REGION_OUTPUT/logs/${sample}_divergence_mutations.tsv"
                 --header chr_endo
+                --mode "$DIVERGENCE_MODE"
                 --rate "$DIVERGENCE_RATE"
                 --generations "$DIVERGENCE_GENERATIONS"
+                --effective-pop-size "$EFFECTIVE_POP_SIZE"
+                --modern-ne "$MODERN_NE"
+                --ancient-ne "$ANCIENT_NE"
+                --ancestral-ne "$ANCESTRAL_NE"
+                --recombination-rate "$RECOMBINATION_RATE"
                 --model "$DIVERGENCE_MODEL"
                 --require-pansn)
+            if [[ "$DIVERGENCE_MODE" == "split" ]]; then
+                DIVERGENCE_CMD+=(--split-generations "$SPLIT_GENERATIONS")
+            fi
             if [[ -n "$DIVERGENCE_SEED" ]]; then
                 DIVERGENCE_CMD+=(--seed "$DIVERGENCE_SEED")
             fi
@@ -402,7 +499,10 @@ EOF
         echo "hap1.fa <- $ENDO_HAP1_ORIG" >> "$MAPPING_LOG"
         echo "hap2.fa <- $ENDO_HAP2_ORIG" >> "$MAPPING_LOG"
         if [[ "$DIVERGE" == true ]]; then
-            echo "divergence <- msprime ${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}" >> "$MAPPING_LOG"
+            echo "divergence <- msprime mode=${DIVERGENCE_MODE}, model=${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}" >> "$MAPPING_LOG"
+            if [[ "$DIVERGENCE_MODE" == "split" ]]; then
+                echo "split <- generations=${SPLIT_GENERATIONS}, modern_ne=${MODERN_NE}, ancient_ne=${ANCIENT_NE}, ancestral_ne=${ANCESTRAL_NE}, recombination=${RECOMBINATION_RATE}" >> "$MAPPING_LOG"
+            fi
             echo "diverged PanSN FASTA: $SAMPLE_DIR/diverged_haplotypes.pansn.fa" >> "$MAPPING_LOG"
         fi
         echo "" >> "$MAPPING_LOG"
