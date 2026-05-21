@@ -68,7 +68,8 @@ cd -
   --control-region chr1:1000000-1050000
   --control-name neutral_control
   --diverge
-  --divergence-generations 1000
+  --divergence-years 6000
+  --generation-time 29
   --seed 13
   -o simulation_output
 ```
@@ -96,6 +97,8 @@ Optional:
 --diverge Add msprime-modeled divergence to endogenous haplotypes
 --divergence-rate FLOAT Mutation rate per bp per generation (default 1.25e-8)
 --divergence-generations INT Terminal branch length in generations (default 1000)
+--divergence-years FLOAT Sample age/divergence time in years before present
+--generation-time FLOAT Years per generation for --divergence-years (default 29)
 --divergence-model MODEL Mutation model: jc69 (default jc69)
 --seed INT Seed for reproducible divergence
 -o DIR Output directory (default output)
@@ -224,7 +227,15 @@ As mentioned above, the pipeline randomly selects a different diploid sample as 
 Provide a reference interval as `chr:start-end` to simulate an additional haploid reference control for every sample. The control uses the same coverage, fragment length, read length, library type, deamination settings, and contamination ratio as the main loci. Coverage is computed from the haploid reference interval in `endo/`, so `-c 0.5` means 0.5x expected endogenous coverage over that control interval.
 
 ### Extra Divergence (`--diverge`)
-Use `--diverge` to add extra substitutions to the selected endogenous haplotypes before gargammel simulates damaged reads. The default is a JC69 mutation process with `--divergence-rate 1.25e-8` per bp per generation and `--divergence-generations 1000`, giving an expected extra divergence of approximately `rate * generations` per callable base. Increase `--divergence-generations` or `--divergence-rate` for stronger divergence. The default is intentionally modest and human-like; the feature is off unless requested.
+Use `--diverge` to add extra substitutions to the selected endogenous haplotypes before gargammel simulates damaged reads. The default is a JC69 mutation process with `--divergence-rate 1.25e-8` per bp per generation and `--divergence-generations 1000`, giving an expected extra divergence of approximately `rate * generations` per callable base. You can also specify archaeological time directly with `--divergence-years` and `--generation-time`; for example, `--divergence-years 6000 --generation-time 29` is converted to about 207 generations. `--divergence-generations` and `--divergence-years` are mutually exclusive.
+
+For human nuclear DNA, a reasonable biological mutation-rate range is about `1.0e-8` to `1.4e-8` per bp per generation, with `1.25e-8` as a practical default. The expected number of added substitutions per haplotype is:
+
+```
+haplotype_length_bp * divergence_rate * divergence_years / generation_time
+```
+
+This means real-time divergence can be very subtle for short loci. At `1.25e-8` and 29 years/generation, a 6000-year-old sample gives about one expected extra mutation per 386 kb. If your selected haplotypes are only 10-50 kb, most haplotypes will often receive zero extra substitutions. For benchmarking sensitivity rather than strict biological realism, increase `--divergence-rate`, `--divergence-years`, or use larger target regions until the expected count is in the range you want.
 
 ## Citation
 

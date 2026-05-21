@@ -19,6 +19,9 @@ CONTROL_NAME="control"
 DIVERGE=false
 DIVERGENCE_RATE="1.25e-8"
 DIVERGENCE_GENERATIONS=1000
+DIVERGENCE_GENERATIONS_SET=false
+DIVERGENCE_YEARS=""
+GENERATION_TIME=29
 DIVERGENCE_MODEL="jc69"
 SEED=""
 
@@ -45,6 +48,8 @@ Optional:
   --diverge               Add msprime-modeled divergence to endogenous haplotypes
   --divergence-rate FLOAT Mutation rate per bp per generation (default 1.25e-8)
   --divergence-generations INT  Terminal branch length in generations (default 1000)
+  --divergence-years FLOAT      Sample age/divergence time in years before present
+  --generation-time FLOAT       Years per generation for --divergence-years (default 29)
   --divergence-model MODEL     Mutation model: jc69 (default jc69)
   --seed INT             Seed for reproducible divergence
   -o DIR      Output directory (default output)
@@ -71,7 +76,9 @@ while [[ $# -gt 0 ]]; do
         --control-name) CONTROL_NAME="$2"; shift 2 ;;
         --diverge) DIVERGE=true; shift ;;
         --divergence-rate) DIVERGENCE_RATE="$2"; shift 2 ;;
-        --divergence-generations) DIVERGENCE_GENERATIONS="$2"; shift 2 ;;
+        --divergence-generations) DIVERGENCE_GENERATIONS="$2"; DIVERGENCE_GENERATIONS_SET=true; shift 2 ;;
+        --divergence-years) DIVERGENCE_YEARS="$2"; shift 2 ;;
+        --generation-time) GENERATION_TIME="$2"; shift 2 ;;
         --divergence-model) DIVERGENCE_MODEL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         -o) OUTPUT_DIR="$2"; shift 2 ;;
@@ -132,6 +139,23 @@ ENDO_RATIO=$(python3 -c "print(round(1.0 - $CONT_RATIO, 6))")
 
 if [[ "$DIVERGENCE_MODEL" != "jc69" ]]; then
     echo "Error: --divergence-model currently supports only 'jc69'"; exit 1
+fi
+
+if [[ -n "$DIVERGENCE_YEARS" ]]; then
+    if [[ "$DIVERGENCE_GENERATIONS_SET" == true ]]; then
+        echo "Error: use either --divergence-generations or --divergence-years, not both"; exit 1
+    fi
+    DIVERGENCE_GENERATIONS=$(python3 - "$DIVERGENCE_YEARS" "$GENERATION_TIME" <<'PY'
+import sys
+years = float(sys.argv[1])
+generation_time = float(sys.argv[2])
+if years < 0:
+    raise SystemExit("--divergence-years must be >= 0")
+if generation_time <= 0:
+    raise SystemExit("--generation-time must be > 0")
+print(years / generation_time)
+PY
+)
 fi
 
 if [[ -n "$CONTROL_REGION" ]]; then
@@ -199,6 +223,9 @@ if [[ -n "$CONTROL_REGION" ]]; then
 fi
 if [[ "$DIVERGE" == true ]]; then
     echo "Divergence: enabled, model=${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}"
+    if [[ -n "$DIVERGENCE_YEARS" ]]; then
+        echo "Divergence years: ${DIVERGENCE_YEARS}, generation time: ${GENERATION_TIME}"
+    fi
 fi
 echo ""
 
@@ -235,6 +262,8 @@ Parameters:
 - Divergence model: $DIVERGENCE_MODEL
 - Divergence rate: $DIVERGENCE_RATE
 - Divergence generations: $DIVERGENCE_GENERATIONS
+- Divergence years: ${DIVERGENCE_YEARS:-none}
+- Generation time: $GENERATION_TIME
 - Regions: $N_REGIONS
 
 Per-Region Details:
