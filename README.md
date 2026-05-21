@@ -15,6 +15,8 @@ Simulate ancient DNA (aDNA) reads from pangenome haplotypes
   - C-to-T transitions at fragment ends
 - **Contamination modeling**: Simulate exogenous human DNA contamination from other samples
 - **Flexible sequencing**: Single-end (SE) or paired-end (PE) library support
+- **Reference controls**: Add a haploid reference control interval (`chr:start-end`) to every sample
+- **Optional extra divergence**: Use msprime-modeled substitutions to make selected pangenome haplotypes slightly more diverged before aDNA read simulation
 
 ## Installation
 
@@ -30,19 +32,12 @@ cd ancestralsim
 ```bash
 ENV_PATH="/path/to/environment/installation/directory"
 mamba env create -f environment.yml -p $ENV_PATH
-#fix incorrext lib
+
+# If your gargammel build needs the older GSL SONAME:
 cd $ENV_PATH/lib
-ln -s libgsl.so.27 libgsl.so.25
+ln -s libgsl.so.27 libgsl.so.25 2>/dev/null || true
 cd -
 ```
-
-### Using singularity
-
-```bash
-singularity pull --dir gargamel/. docker://quay.io/biocontainers/gargammel:1.1.4--hb66fcc3_0
-```
-
-When using this `singularity` container, you need to also have `bwa`, `fastp` and `samtools` executables available in `$PATH`.
 
 ## Quick Start
 
@@ -64,6 +59,18 @@ When using this `singularity` container, you need to also have `bwa`, `fastp` an
   -c 1.0
   --cont-ratio 0.15
   -o simulation_output
+
+# Add a haploid reference control region and extra msprime-modeled divergence
+./ancestralsim.sh
+  -r reference/GRCh38.fa
+  -g ./gargammel
+  -b region_mapping.tsv
+  --control-region chr1:1000000-1050000
+  --control-name neutral_control
+  --diverge
+  --divergence-generations 1000
+  --seed 13
+  -o simulation_output
 ```
 
 ## Usage
@@ -84,6 +91,13 @@ Optional:
 -d TYPE Deamination type: single|double (default single)
 --deam-rate "VALS" Custom deam rates like "0.03,0.4,0.01,0.3"
 --cont-ratio FLOAT Exogenous DNA ratio (default 0.1)
+--control-region REGION Haploid reference control region chr:start-end
+--control-name NAME Name for control-region outputs (default control)
+--diverge Add msprime-modeled divergence to endogenous haplotypes
+--divergence-rate FLOAT Mutation rate per bp per generation (default 1.25e-8)
+--divergence-generations INT Terminal branch length in generations (default 1000)
+--divergence-model MODEL Mutation model: jc69 (default jc69)
+--seed INT Seed for reproducible divergence
 -o DIR Output directory (default output)
 -t INT Threads (default 4)
 -h Show this help
@@ -124,6 +138,8 @@ ACGTACGTACGT...
 
 The pipeline automatically identifies diploid samples (those with both haplotype #1 and #2) and while it uses a diploid sample for simulation of aDNA reads, another random diploid sample from the same set is used to simulate modern-day contaminants. 
 
+When `--diverge` is used, the selected endogenous haplotype headers are validated against this PanSN-style `sample#haplotype#contig` convention. The pipeline writes a per-sample `diverged_haplotypes.pansn.fa` preserving those headers, and also writes gargammel-ready copies with a shared internal chromosome name because gargammel expects the two endogenous FASTA files to contain matching sequence names.
+
 ## Output
 
 The pipeline generates:
@@ -140,10 +156,15 @@ output/
 │ │ ├── logs/
 │ │ │ ├── HG00096_sequence_mapping.txt
 │ │ │ ├── HG00096_gargammel.log
+│ │ │ ├── HG00096_divergence.tsv # Only with --diverge
 │ │ │ └── HG00096_fastp.html
 │ │ └── region_summary.txt
 │ └── MUC1/
 │ └── (same structure)
+├── chr1/
+│ └── neutral_control/ # Only with --control-region
+│ ├── neutral_control.pansn.fa
+│ └── bams/
 ├── chr17/
 │ └── BRCA1/
 │ └── (same structure)
@@ -159,6 +180,8 @@ output/
 - **`chr*/region/bams/*.sorted.bam`**: Per-region aligned aDNA reads
 - **`merged_bams/*.merged.bam`**: Per-sample BAMs merged across all regions
 - **`logs/*_sequence_mapping.txt`**: Maps simulated sequences to original haplotype names
+- **`logs/*_divergence.tsv`**: Expected and applied divergence mutations per haplotype when `--diverge` is enabled
+- **`temp/*/diverged_haplotypes.pansn.fa`**: Diverged haplotypes with original PanSN headers
 - **`logs/*_fastp.html`**: Adapter trimming quality reports
 - **`merge_commands.sh`**: Script to merge per-region BAMs into per-sample BAMs
 
@@ -197,11 +220,18 @@ Proportion of exogenous human DNA contamination (0.0-1.0):
 
 As mentioned above, the pipeline randomly selects a different diploid sample as the contaminant source.
 
+### Control Region (`--control-region`)
+Provide a reference interval as `chr:start-end` to simulate an additional haploid reference control for every sample. The control uses the same coverage, fragment length, read length, library type, deamination settings, and contamination ratio as the main loci. Coverage is computed from the haploid reference interval in `endo/`, so `-c 0.5` means 0.5x expected endogenous coverage over that control interval.
+
+### Extra Divergence (`--diverge`)
+Use `--diverge` to add extra substitutions to the selected endogenous haplotypes before gargammel simulates damaged reads. The default is a JC69 mutation process with `--divergence-rate 1.25e-8` per bp per generation and `--divergence-generations 1000`, giving an expected extra divergence of approximately `rate * generations` per callable base. Increase `--divergence-generations` or `--divergence-rate` for stronger divergence. The default is intentionally modest and human-like; the feature is off unless requested.
+
 ## Citation
 
-If you use ancestralsim in your research, please cite the gargammel paper:
+If you use ancestralsim in your research, please cite the relevant simulator papers:
 
 - **gargammel**: Renaud G, Hanghøj K, Korneliussen TS, et al. (2017) gargammel: a sequence simulator for ancient DNA. *Bioinformatics* 33(4):577-579. [doi:10.1093/bioinformatics/btw670](https://doi.org/10.1093/bioinformatics/btw670)
+- **msprime**: Kelleher J, Etheridge AM, McVean G. (2016) Efficient coalescent simulation and genealogical analysis for large sample sizes. *PLOS Computational Biology* 12(5):e1004842. [doi:10.1371/journal.pcbi.1004842](https://doi.org/10.1371/journal.pcbi.1004842)
 
 ## License
 

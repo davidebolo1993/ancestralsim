@@ -1,17 +1,15 @@
 name: ancestralsim
 channels:
-  - defaults
-  - bioconda
   - conda-forge
+  - bioconda
+  - defaults
 dependencies:
-  - python=2.7
+  - python>=3.10
   - gargammel
-  - ms
-  - seq-gen
-  - numpy
-  - scipy
-  - biopython
   - msprime
+  - tskit
   - samtools
   - bwa
   - fastp
+  - bc
+  - perl

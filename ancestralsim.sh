@@ -14,8 +14,16 @@ THREADS=4
 GARGAMMEL_DIR=""
 CONT_RATIO=0.1
 REGION_MAP=""
+CONTROL_REGION=""
+CONTROL_NAME="control"
+DIVERGE=false
+DIVERGENCE_RATE="1.25e-8"
+DIVERGENCE_GENERATIONS=1000
+DIVERGENCE_MODEL="jc69"
+SEED=""
 
 usage() {
+local exit_code="${1:-1}"
 cat <<EOF
 Usage: $0 -r <reference.fa> -g <gargammel_dir> -b <region_mapping.tsv> [options]
 
@@ -32,12 +40,19 @@ Optional:
   -d TYPE     Deamination type: single|double (default single)
   --deam-rate "VALS"  Custom deam rates like "0.03,0.4,0.01,0.3"
   --cont-ratio FLOAT  Exogenous DNA ratio (default 0.1)
+  --control-region REGION  Haploid reference control region chr:start-end
+  --control-name NAME      Name for control-region outputs (default control)
+  --diverge               Add msprime-modeled divergence to endogenous haplotypes
+  --divergence-rate FLOAT Mutation rate per bp per generation (default 1.25e-8)
+  --divergence-generations INT  Terminal branch length in generations (default 1000)
+  --divergence-model MODEL     Mutation model: jc69 (default jc69)
+  --seed INT             Seed for reproducible divergence
   -o DIR      Output directory (default output)
   -t INT      Threads (default 4)
   -h          Show this help
 
 EOF
-exit 1
+exit "$exit_code"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -52,9 +67,16 @@ while [[ $# -gt 0 ]]; do
         -d) DEAMINATION="$2"; shift 2 ;;
         --deam-rate) DEAM_RATE="$2"; shift 2 ;;
         --cont-ratio) CONT_RATIO="$2"; shift 2 ;;
+        --control-region) CONTROL_REGION="$2"; shift 2 ;;
+        --control-name) CONTROL_NAME="$2"; shift 2 ;;
+        --diverge) DIVERGE=true; shift ;;
+        --divergence-rate) DIVERGENCE_RATE="$2"; shift 2 ;;
+        --divergence-generations) DIVERGENCE_GENERATIONS="$2"; shift 2 ;;
+        --divergence-model) DIVERGENCE_MODEL="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
         -o) OUTPUT_DIR="$2"; shift 2 ;;
         -t) THREADS="$2"; shift 2 ;;
-        -h) usage ;;
+        -h) usage 0 ;;
         *) echo "Unknown option $1"; usage ;;
     esac
 done
@@ -70,59 +92,20 @@ if [[ ! -f "$REGION_MAP" ]]; then
 fi
 
 REFERENCE=$(realpath "$REFERENCE")
-OUTPUT_DIR=$(realpath "$OUTPUT_DIR")
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd -P)
 GARGAMMEL_DIR=$(realpath "$GARGAMMEL_DIR")
 REGION_MAP=$(realpath "$REGION_MAP")
-
-USE_SINGULARITY=false
-SINGULARITY_CONTAINER=""
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if command -v gargammel &>/dev/null; then
     GARGAMMEL_CMD="gargammel"
     echo "Using gargammel from PATH"
-elif command -v singularity &>/dev/null; then
-    SINGULARITY_CONTAINER="$GARGAMMEL_DIR/gargammel_1.1.4--hb66fcc3_0.sif"
-    if [[ -f "$SINGULARITY_CONTAINER" ]]; then
-        USE_SINGULARITY=true
-        echo "Using gargammel via Singularity container"
-        
-        BIND_PATHS=""
-        declare -A BIND_DIRS
-        
-        while IFS=$'\t' read -r _ _ alleles_file; do
-            [[ "$alleles_file" =~ ^#.*$ ]] && continue
-            [[ -z "$alleles_file" ]] && continue
-            alleles_file=$(realpath "$alleles_file" 2>/dev/null) || continue
-            ALLELES_DIR=$(dirname "$alleles_file")
-            BIND_DIRS["$ALLELES_DIR"]=1
-        done < "$REGION_MAP"
-        
-        REF_DIR=$(dirname "$REFERENCE")
-        BIND_DIRS["$REF_DIR"]=1
-        BIND_DIRS["$OUTPUT_DIR"]=1
-        BIND_DIRS["$GARGAMMEL_DIR"]=1
-        
-        for dir in "${!BIND_DIRS[@]}"; do
-            if [[ -z "$BIND_PATHS" ]]; then
-                BIND_PATHS="$dir"
-            else
-                BIND_PATHS="$BIND_PATHS,$dir"
-            fi
-        done
-        
-        GARGAMMEL_CMD="singularity exec -B \"$BIND_PATHS\" $SINGULARITY_CONTAINER gargammel"
-    else
-        echo "Error: Singularity container not found: $SINGULARITY_CONTAINER"
-        exit 1
-    fi
+elif [[ -f "$GARGAMMEL_DIR/gargammel.pl" ]]; then
+    GARGAMMEL_CMD="perl \"$GARGAMMEL_DIR/gargammel.pl\""
+    echo "Using gargammel.pl from $GARGAMMEL_DIR"
 else
-    echo "Error: Neither gargammel nor singularity found."; exit 1
-fi
-
-if [[ "$USE_SINGULARITY" == false ]]; then
-    if [[ ! -f "$GARGAMMEL_DIR/gargammel.pl" ]]; then
-        echo "Error: gargammel.pl not found in $GARGAMMEL_DIR"; exit 1
-    fi
+    echo "Error: gargammel not found in PATH and gargammel.pl not found in $GARGAMMEL_DIR"; exit 1
 fi
 
 MATRIX_DIR="$GARGAMMEL_DIR/src/matrices"
@@ -131,9 +114,6 @@ MATRIX_DOUBLE="$MATRIX_DIR/double-"
 
 if [[ ! -d "$MATRIX_DIR" ]]; then
     echo "Error: Matrices directory missing: $MATRIX_DIR"; exit 1
-fi
-if [[ "$USE_SINGULARITY" == true ]]; then
-    BIND_PATHS="$BIND_PATHS,$MATRIX_DIR"
 fi
 
 if [[ "$LIBRARY_TYPE" != "se" ]] && [[ "$LIBRARY_TYPE" != "pe" ]]; then
@@ -150,11 +130,57 @@ fi
 
 ENDO_RATIO=$(python3 -c "print(round(1.0 - $CONT_RATIO, 6))")
 
-for cmd in samtools bwa fastp; do
+if [[ "$DIVERGENCE_MODEL" != "jc69" ]]; then
+    echo "Error: --divergence-model currently supports only 'jc69'"; exit 1
+fi
+
+if [[ -n "$CONTROL_REGION" ]]; then
+    if [[ "$CONTROL_REGION" =~ ^([^:]+):([0-9]+)-([0-9]+)$ ]]; then
+        CONTROL_CHR="${BASH_REMATCH[1]}"
+        CONTROL_START="${BASH_REMATCH[2]}"
+        CONTROL_END="${BASH_REMATCH[3]}"
+        CONTROL_CONTIG="${CONTROL_CHR}_${CONTROL_START}_${CONTROL_END}"
+        if (( CONTROL_START < 1 || CONTROL_END < CONTROL_START )); then
+            echo "Error: invalid --control-region coordinates: $CONTROL_REGION"; exit 1
+        fi
+    else
+        echo "Error: --control-region must be formatted as chr:start-end"; exit 1
+    fi
+fi
+
+for cmd in samtools bwa fastp python3 bc; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd not found. Please install it."; exit 1
     fi
 done
+
+if [[ "$DIVERGE" == true ]]; then
+    if [[ ! -f "$SCRIPT_DIR/scripts/diverge_haplotypes_msprime.py" ]]; then
+        echo "Error: divergence helper missing: $SCRIPT_DIR/scripts/diverge_haplotypes_msprime.py"; exit 1
+    fi
+    python3 -c "import msprime, tskit" 2>/dev/null || {
+        echo "Error: --diverge requires msprime and tskit in the active environment"; exit 1
+    }
+fi
+
+derive_seed() {
+    local label="$1"
+    if [[ -z "$SEED" ]]; then
+        echo ""
+    else
+        local hashed
+        hashed=$(printf "%s" "${SEED}:${label}" | cksum | awk '{print $1}')
+        echo $(( (hashed % 2147483646) + 1 ))
+    fi
+}
+
+mark_extracted_chr() {
+    printf '%s\n' "$1" >> "$CHR_EXTRACTED_LIST"
+}
+
+have_extracted_chr() {
+    grep -Fxq "$1" "$CHR_EXTRACTED_LIST"
+}
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -168,10 +194,22 @@ echo "Reference: $REFERENCE"
 echo "Region mapping: $REGION_MAP"
 echo "Coverage: ${COVERAGE}x, Fragment: ${FRAGMENT_LENGTH}bp, Read: ${READ_LENGTH}bp"
 echo "Library: $LIBRARY_TYPE, Deamination: $DEAMINATION, Contamination: ${CONT_RATIO}"
+if [[ -n "$CONTROL_REGION" ]]; then
+    echo "Control region: $CONTROL_REGION ($CONTROL_NAME)"
+fi
+if [[ "$DIVERGE" == true ]]; then
+    echo "Divergence: enabled, model=${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}"
+fi
 echo ""
 
-declare -A CHR_EXTRACTED
-N_REGIONS=$(grep -v "^#" "$REGION_MAP" | grep -v "^$" | wc -l)
+CHR_EXTRACTED_LIST="$OUTPUT_DIR/.chromosomes_extracted.list"
+ALL_SAMPLES_FILE="$OUTPUT_DIR/.all_samples.list"
+UNIQUE_SAMPLES_FILE="$OUTPUT_DIR/.unique_samples.list"
+: > "$CHR_EXTRACTED_LIST"
+: > "$ALL_SAMPLES_FILE"
+: > "$UNIQUE_SAMPLES_FILE"
+
+N_REGIONS=$(grep -v "^#" "$REGION_MAP" | grep -v "^$" | wc -l | awk '{print $1}')
 echo "Found $N_REGIONS regions to process"
 echo ""
 
@@ -192,6 +230,11 @@ Parameters:
 - Library: $LIBRARY_TYPE
 - Deamination: $DEAMINATION
 - Contamination: ${CONT_RATIO}
+- Control region: ${CONTROL_REGION:-none}
+- Divergence: $DIVERGE
+- Divergence model: $DIVERGENCE_MODEL
+- Divergence rate: $DIVERGENCE_RATE
+- Divergence generations: $DIVERGENCE_GENERATIONS
 - Regions: $N_REGIONS
 
 Per-Region Details:
@@ -215,8 +258,6 @@ echo ""
 
 EOF
 
-declare -A ALL_SAMPLES
-
 REGION_NUM=0
 while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
     [[ "$TARGET_CHR" =~ ^#.*$ ]] && continue
@@ -239,7 +280,7 @@ while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
     
     CHROM_REFERENCE="$OUTPUT_DIR/${TARGET_CHR}/reference_${TARGET_CHR}.fa"
     
-    if [[ -z "${CHR_EXTRACTED[$TARGET_CHR]}" ]]; then
+    if ! have_extracted_chr "$TARGET_CHR"; then
         echo "Extracting chromosome ${TARGET_CHR}..."
         mkdir -p "$OUTPUT_DIR/${TARGET_CHR}"
         samtools faidx "$REFERENCE" "$TARGET_CHR" > "$CHROM_REFERENCE"
@@ -254,7 +295,7 @@ while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
         bwa index "$CHROM_REFERENCE"
         samtools faidx "$CHROM_REFERENCE"
         
-        CHR_EXTRACTED[$TARGET_CHR]=1
+        mark_extracted_chr "$TARGET_CHR"
     fi
     
     ALIGN_REFERENCE="$CHROM_REFERENCE"
@@ -267,7 +308,7 @@ while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
     # Identify diploid samples (2 alleles per sample)
     awk -F'[#\t]' '{print $1}' "$FAI_FILE" | sort | uniq -c | \
     awk '$1==2 {print $2}' > "$REGION_OUTPUT/temp/diploid_samples.txt"
-    NDIPLOID=$(wc -l < "$REGION_OUTPUT/temp/diploid_samples.txt")
+    NDIPLOID=$(wc -l < "$REGION_OUTPUT/temp/diploid_samples.txt" | awk '{print $1}')
     
     if [[ $NDIPLOID -eq 0 ]]; then
         echo "WARNING: No diploid samples found, skipping"
@@ -279,7 +320,7 @@ while IFS=$'\t' read -r TARGET_CHR REGION_NAME ALLELES_FASTA; do
     echo ""
     
     while IFS= read -r sample; do
-        ALL_SAMPLES[$sample]=1
+        printf '%s\n' "$sample" >> "$ALL_SAMPLES_FILE"
     done < "$REGION_OUTPUT/temp/diploid_samples.txt"
     
     cat >> "$GLOBAL_SUMMARY" <<EOF
@@ -292,7 +333,7 @@ EOF
     while IFS= read -r sample; do
         echo "  Sample: ${sample}"
         SAMPLE_DIR="$REGION_OUTPUT/temp/${sample}"
-        mkdir -p "$SAMPLE_DIR"/{endo,cont,bact}
+        mkdir -p "$SAMPLE_DIR"/{endo,cont,bact,source}
         
         MAPPING_LOG="$REGION_OUTPUT/logs/${sample}_sequence_mapping.txt"
         echo "Sample: ${sample} | Chromosome: ${TARGET_CHR} | Region: ${REGION_NAME}" > "$MAPPING_LOG"
@@ -302,14 +343,39 @@ EOF
         ENDO_HAP1_ORIG=$(grep "^${sample}#1#" "$FAI_FILE" | cut -f1)
         ENDO_HAP2_ORIG=$(grep "^${sample}#2#" "$FAI_FILE" | cut -f1)
         
-        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" | \
-            sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap1.fa"
-        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP2_ORIG" | \
-            sed "s/^>.*/>chr_endo/" > "$SAMPLE_DIR/endo/hap2.fa"
+        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP1_ORIG" > "$SAMPLE_DIR/source/hap1.pansn.fa"
+        samtools faidx "$ALLELES_FASTA" "$ENDO_HAP2_ORIG" > "$SAMPLE_DIR/source/hap2.pansn.fa"
+
+        if [[ "$DIVERGE" == true ]]; then
+            DIVERGENCE_SEED=$(derive_seed "${TARGET_CHR}:${REGION_NAME}:${sample}")
+            DIVERGENCE_CMD=(python3 "$SCRIPT_DIR/scripts/diverge_haplotypes_msprime.py"
+                --hap1 "$SAMPLE_DIR/source/hap1.pansn.fa"
+                --hap2 "$SAMPLE_DIR/source/hap2.pansn.fa"
+                --out-hap1 "$SAMPLE_DIR/endo/hap1.fa"
+                --out-hap2 "$SAMPLE_DIR/endo/hap2.fa"
+                --pansn-output "$SAMPLE_DIR/diverged_haplotypes.pansn.fa"
+                --report "$REGION_OUTPUT/logs/${sample}_divergence.tsv"
+                --header chr_endo
+                --rate "$DIVERGENCE_RATE"
+                --generations "$DIVERGENCE_GENERATIONS"
+                --model "$DIVERGENCE_MODEL"
+                --require-pansn)
+            if [[ -n "$DIVERGENCE_SEED" ]]; then
+                DIVERGENCE_CMD+=(--seed "$DIVERGENCE_SEED")
+            fi
+            "${DIVERGENCE_CMD[@]}"
+        else
+            sed "s/^>.*/>chr_endo/" "$SAMPLE_DIR/source/hap1.pansn.fa" > "$SAMPLE_DIR/endo/hap1.fa"
+            sed "s/^>.*/>chr_endo/" "$SAMPLE_DIR/source/hap2.pansn.fa" > "$SAMPLE_DIR/endo/hap2.fa"
+        fi
         
         echo "[ENDOGENOUS]" >> "$MAPPING_LOG"
         echo "hap1.fa <- $ENDO_HAP1_ORIG" >> "$MAPPING_LOG"
         echo "hap2.fa <- $ENDO_HAP2_ORIG" >> "$MAPPING_LOG"
+        if [[ "$DIVERGE" == true ]]; then
+            echo "divergence <- msprime ${DIVERGENCE_MODEL}, rate=${DIVERGENCE_RATE}, generations=${DIVERGENCE_GENERATIONS}" >> "$MAPPING_LOG"
+            echo "diverged PanSN FASTA: $SAMPLE_DIR/diverged_haplotypes.pansn.fa" >> "$MAPPING_LOG"
+        fi
         echo "" >> "$MAPPING_LOG"
 
         if (( $(echo "$CONT_RATIO > 0" | bc -l) )); then
@@ -447,9 +513,182 @@ EOF
     
 done < "$REGION_MAP"
 
+sort -u "$ALL_SAMPLES_FILE" > "$UNIQUE_SAMPLES_FILE"
+UNIQUE_SAMPLE_COUNT=$(wc -l < "$UNIQUE_SAMPLES_FILE" | awk '{print $1}')
+
+if [[ -n "$CONTROL_REGION" ]]; then
+    echo "Processing control region: ${CONTROL_REGION}"
+    CONTROL_OUTPUT="$OUTPUT_DIR/${CONTROL_CHR}/${CONTROL_NAME}"
+    mkdir -p "$CONTROL_OUTPUT"/{logs,temp,bams}
+
+    CHROM_REFERENCE="$OUTPUT_DIR/${CONTROL_CHR}/reference_${CONTROL_CHR}.fa"
+    if ! have_extracted_chr "$CONTROL_CHR"; then
+        echo "Extracting chromosome ${CONTROL_CHR}..."
+        mkdir -p "$OUTPUT_DIR/${CONTROL_CHR}"
+        samtools faidx "$REFERENCE" "$CONTROL_CHR" > "$CHROM_REFERENCE"
+
+        if [[ ! -s "$CHROM_REFERENCE" ]]; then
+            echo "ERROR: Failed to extract $CONTROL_CHR, skipping control region"
+            CONTROL_REGION=""
+        else
+            echo "Indexing ${CONTROL_CHR} with BWA..."
+            bwa index "$CHROM_REFERENCE"
+            samtools faidx "$CHROM_REFERENCE"
+            mark_extracted_chr "$CONTROL_CHR"
+        fi
+    fi
+
+    if [[ -n "$CONTROL_REGION" ]]; then
+        CONTROL_FASTA="$CONTROL_OUTPUT/temp/${CONTROL_NAME}.reference.pansn.fa"
+        CONTROL_GARGAMMEL_FASTA="$CONTROL_OUTPUT/temp/${CONTROL_NAME}.reference.fa"
+        samtools faidx "$REFERENCE" "$CONTROL_REGION" > "$CONTROL_FASTA"
+        sed "s/^>.*/>${CONTROL_NAME}#1#${CONTROL_CONTIG}/" "$CONTROL_FASTA" > "$CONTROL_OUTPUT/${CONTROL_NAME}.pansn.fa"
+        sed "s/^>.*/>chr_endo/" "$CONTROL_FASTA" > "$CONTROL_GARGAMMEL_FASTA"
+
+        cat >> "$GLOBAL_SUMMARY" <<EOF
+${CONTROL_CHR}/${CONTROL_NAME}: haploid reference control
+  Region: $CONTROL_REGION
+  Output: $CONTROL_OUTPUT/bams/
+
+EOF
+
+        while IFS= read -r sample; do
+            [[ -z "$sample" ]] && continue
+            echo "  Control sample: ${sample}"
+            SAMPLE_DIR="$CONTROL_OUTPUT/temp/${sample}"
+            mkdir -p "$SAMPLE_DIR"/{endo,cont,bact}
+
+            MAPPING_LOG="$CONTROL_OUTPUT/logs/${sample}_sequence_mapping.txt"
+            echo "Sample: ${sample} | Control region: ${CONTROL_REGION}" > "$MAPPING_LOG"
+            echo "Date: $(date)" >> "$MAPPING_LOG"
+            echo "" >> "$MAPPING_LOG"
+
+            cp "$CONTROL_GARGAMMEL_FASTA" "$SAMPLE_DIR/endo/control.fa"
+            echo "[ENDOGENOUS CONTROL]" >> "$MAPPING_LOG"
+            echo "control.fa <- $CONTROL_REGION from $REFERENCE" >> "$MAPPING_LOG"
+            echo "haploid reference control; gargammel -c coverage is computed from this region" >> "$MAPPING_LOG"
+            echo "" >> "$MAPPING_LOG"
+
+            if (( $(echo "$CONT_RATIO > 0" | bc -l) )); then
+                sed "s/^>.*/>chr_cont/" "$CONTROL_FASTA" > "$SAMPLE_DIR/cont/control_cont.fa"
+                echo "[CONTAMINANT CONTROL] - reference control" >> "$MAPPING_LOG"
+                echo "control_cont.fa <- $CONTROL_REGION from $REFERENCE" >> "$MAPPING_LOG"
+                echo "" >> "$MAPPING_LOG"
+            else
+                sed "s/^>.*/>chr_cont/" "$CONTROL_FASTA" > "$SAMPLE_DIR/cont/dummy.fa"
+                echo "[CONTAMINANT] - None" >> "$MAPPING_LOG"
+                echo "" >> "$MAPPING_LOG"
+            fi
+
+            sed "s/^>.*/>chr_bact/" "$CONTROL_FASTA" > "$SAMPLE_DIR/bact/dummy.fa"
+            echo "[BACTERIAL] - None" >> "$MAPPING_LOG"
+            echo "" >> "$MAPPING_LOG"
+
+            GARGAMMEL_RUN="$GARGAMMEL_CMD \
+                -c $COVERAGE \
+                --comp 0,$CONT_RATIO,$ENDO_RATIO \
+                -l $FRAGMENT_LENGTH \
+                -rl $READ_LENGTH \
+                -o $SAMPLE_DIR/sim"
+
+            if [[ -n "$DEAM_RATE" ]]; then
+                GARGAMMEL_RUN="$GARGAMMEL_RUN -damage $DEAM_RATE"
+            else
+                if [[ "$DEAMINATION" == "single" ]]; then
+                    MATRIX="$MATRIX_SINGLE"
+                else
+                    MATRIX="$MATRIX_DOUBLE"
+                fi
+                GARGAMMEL_RUN="$GARGAMMEL_RUN -matfile $MATRIX"
+            fi
+
+            if [[ "$LIBRARY_TYPE" == "se" ]]; then
+                GARGAMMEL_RUN="$GARGAMMEL_RUN -se"
+            fi
+
+            GARGAMMEL_RUN="$GARGAMMEL_RUN $SAMPLE_DIR"
+            eval $GARGAMMEL_RUN > "$CONTROL_OUTPUT/logs/${sample}_gargammel.log" 2>&1
+
+            if [[ "$LIBRARY_TYPE" == "pe" ]]; then
+                fastp \
+                    --in1 "$SAMPLE_DIR/sim_s1.fq.gz" \
+                    --in2 "$SAMPLE_DIR/sim_s2.fq.gz" \
+                    --out1 "$SAMPLE_DIR/sim_s1_trimmed.fq.gz" \
+                    --out2 "$SAMPLE_DIR/sim_s2_trimmed.fq.gz" \
+                    --detect_adapter_for_pe \
+                    --thread "$THREADS" \
+                    --length_required 25 \
+                    --json "$CONTROL_OUTPUT/logs/${sample}_fastp.json" \
+                    --html "$CONTROL_OUTPUT/logs/${sample}_fastp.html" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_fastp.log"
+
+                READ1="$SAMPLE_DIR/sim_s1_trimmed.fq.gz"
+                READ2="$SAMPLE_DIR/sim_s2_trimmed.fq.gz"
+            else
+                fastp \
+                    --in1 "$SAMPLE_DIR/sim_s.fq.gz" \
+                    --out1 "$SAMPLE_DIR/sim_s_trimmed.fq.gz" \
+                    --thread "$THREADS" \
+                    --length_required 25 \
+                    --json "$CONTROL_OUTPUT/logs/${sample}_fastp.json" \
+                    --html "$CONTROL_OUTPUT/logs/${sample}_fastp.html" \
+                    --adapter_sequence AGATCGGAAGAGCACACGTCTGAACTCCAG \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_fastp.log"
+
+                READ1="$SAMPLE_DIR/sim_s_trimmed.fq.gz"
+            fi
+
+            if [[ "$LIBRARY_TYPE" == "pe" ]]; then
+                bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                    "$CHROM_REFERENCE" "$READ1" \
+                    > "$SAMPLE_DIR/sim_1.sai" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_bwa_aln_1.log"
+
+                bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                    "$CHROM_REFERENCE" "$READ2" \
+                    > "$SAMPLE_DIR/sim_2.sai" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_bwa_aln_2.log"
+
+                bwa sampe "$CHROM_REFERENCE" \
+                    "$SAMPLE_DIR/sim_1.sai" "$SAMPLE_DIR/sim_2.sai" \
+                    "$READ1" "$READ2" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_bwa_sampe.log" | \
+                samtools sort -@ "$THREADS" \
+                    -o "$CONTROL_OUTPUT/bams/${sample}.sorted.bam" -
+            else
+                bwa aln -l 16500 -n 0.01 -o 2 -t "$THREADS" \
+                    "$CHROM_REFERENCE" "$READ1" \
+                    > "$SAMPLE_DIR/sim.sai" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_bwa_aln.log"
+
+                bwa samse "$CHROM_REFERENCE" \
+                    "$SAMPLE_DIR/sim.sai" "$READ1" \
+                    2> "$CONTROL_OUTPUT/logs/${sample}_bwa_samse.log" | \
+                samtools sort -@ "$THREADS" \
+                    -o "$CONTROL_OUTPUT/bams/${sample}.sorted.bam" -
+            fi
+
+            samtools index "$CONTROL_OUTPUT/bams/${sample}.sorted.bam"
+            samtools flagstat "$CONTROL_OUTPUT/bams/${sample}.sorted.bam" \
+                > "$CONTROL_OUTPUT/bams/${sample}.flagstat.txt"
+        done < "$UNIQUE_SAMPLES_FILE"
+
+        cat > "$CONTROL_OUTPUT/region_summary.txt" <<EOF
+Region: ${CONTROL_CHR}/${CONTROL_NAME}
+Date: $(date)
+Reference control region: $CONTROL_REGION
+Haploid control FASTA: $CONTROL_OUTPUT/${CONTROL_NAME}.pansn.fa
+BAM files: $CONTROL_OUTPUT/bams/
+EOF
+    fi
+
+    echo ""
+fi
+
 echo "" >> "$MERGE_SCRIPT"
 
-for sample in "${!ALL_SAMPLES[@]}"; do
+while IFS= read -r sample; do
+    [[ -z "$sample" ]] && continue
     cat >> "$MERGE_SCRIPT" <<EOF
 
 echo "Merging: $sample"
@@ -464,6 +703,12 @@ EOF
 [[ -f "\$OUTPUT_DIR/${chr}/${region}/bams/${sample}.sorted.bam" ]] && SAMPLE_BAMS+=("\$OUTPUT_DIR/${chr}/${region}/bams/${sample}.sorted.bam")
 EOF
     done < "$REGION_MAP"
+
+    if [[ -n "$CONTROL_REGION" ]]; then
+        cat >> "$MERGE_SCRIPT" <<EOF
+[[ -f "\$OUTPUT_DIR/${CONTROL_CHR}/${CONTROL_NAME}/bams/${sample}.sorted.bam" ]] && SAMPLE_BAMS+=("\$OUTPUT_DIR/${CONTROL_CHR}/${CONTROL_NAME}/bams/${sample}.sorted.bam")
+EOF
+    fi
     
     cat >> "$MERGE_SCRIPT" <<EOF
 
@@ -479,7 +724,7 @@ else
     echo "  WARNING: No BAMs found"
 fi
 EOF
-done
+done < "$UNIQUE_SAMPLES_FILE"
 
 cat >> "$MERGE_SCRIPT" <<'EOF'
 
@@ -495,7 +740,8 @@ cat >> "$GLOBAL_SUMMARY" <<EOF
 Summary:
 =========
 Regions processed: $REGION_NUM
-Unique samples: ${#ALL_SAMPLES[@]}
+Control region: ${CONTROL_REGION:-none}
+Unique samples: $UNIQUE_SAMPLE_COUNT
 
 To merge BAMs per sample:
   bash $MERGE_SCRIPT
@@ -503,8 +749,7 @@ To merge BAMs per sample:
 EOF
 
 echo "=== AncestralSim Complete ==="
-echo "Regions: $REGION_NUM | Samples: ${#ALL_SAMPLES[@]}"
+echo "Regions: $REGION_NUM | Samples: $UNIQUE_SAMPLE_COUNT"
 echo "Output: $OUTPUT_DIR"
 echo "Merge: bash $MERGE_SCRIPT"
 echo ""
-
