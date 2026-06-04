@@ -49,7 +49,7 @@
   -o terminal_6k
 ```
 
-## Split-Demography Revision Conditions
+## Split-Demography
 
 Conservative baseline with equal effective population sizes:
 
