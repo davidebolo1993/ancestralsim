@@ -7,5 +7,5 @@ This directory contains focused notes for each part of the pipeline.
 - [Control Regions](control_regions.md): haploid reference control intervals and their outputs.
 - [Divergence](divergence.md): terminal-branch and split-demography divergence modes.
 - [Outputs](outputs.md): output directory layout, reports, BAMs, and merge script.
-- [Example Scenarios](examples.md): example commands, including the revision conditions.
+- [Example Scenarios](examples.md): example commands.
 
