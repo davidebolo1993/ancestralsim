@@ -21,7 +21,7 @@ Detailed documentation lives in [docs/](docs/README.md):
 - [Control Regions](docs/control_regions.md): `--control-region` behavior and outputs.
 - [Divergence](docs/divergence.md): terminal and split-demography divergence modes.
 - [Outputs](docs/outputs.md): output layout and reports.
-- [Example Scenarios](docs/examples.md): example commands and revision conditions.
+- [Example Scenarios](docs/examples.md): example commands.
 
 ## Installation
 
